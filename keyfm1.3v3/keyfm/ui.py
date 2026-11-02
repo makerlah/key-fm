@@ -1,8 +1,8 @@
 """keyfm UI - PySide6 port.
 
-Step 2 of the mandatory iteration protocol:
-    sidebar (Quick Access, pins, THIS PC, drives, drive usage threads,
-             context menu, Delete-to-unpin, ★ toggle).
+Step 3 of the mandatory iteration protocol:
+    path/filter shortcuts (Ctrl+L / Ctrl+F / Ctrl+B), typeahead, and the
+    lasso (rubber-band selection) with faithful row-fraction edge auto-scroll.
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -27,10 +27,11 @@ STEP 1 (done):
     window, QTableView over ``self.shown``, FileListModel, navigate,
     reload, sort (header click), filter (150 ms debounce), path entry,
     status / flash, apply_theme (initial pass).
-STEP 2 (this file): sidebar, QUICK ACCESS pins, THIS PC, drive usage threads,
-                    sidebar context menu, Delete-to-unpin, ★ button.
-STEP 3 (next):      lasso geometry port, typeahead, filter/path shortcuts.
-STEP 4:             Tab model save/load, tab strip widget, Alt+N, close.
+STEP 2 (done): sidebar, QUICK ACCESS pins, THIS PC, drive usage threads,
+               sidebar context menu, Delete-to-unpin, ★ button.
+STEP 3 (this file): path/filter shortcuts, typeahead, lasso (rubber-band
+                    selection) with row-fraction edge auto-scroll.
+STEP 4 (next):      Tab model save/load, tab strip widget, Alt+N, close.
 STEP 5:             menus, ACTION_DEFS bindings, QShortcut, shortcuts dialog,
                     capture dialog, reset_all.
 STEP 6:             context menus, rename / new file / new folder /
@@ -48,14 +49,17 @@ import time
 import traceback
 
 from PySide6.QtCore import (
-    Qt, QAbstractTableModel, QModelIndex, QObject, QRunnable,
-    QThreadPool, QTimer, Signal,
+    Qt, QAbstractTableModel, QModelIndex, QObject, QRect, QRunnable,
+    QThreadPool, QTimer, QItemSelection, QItemSelectionModel, Signal,
 )
-from PySide6.QtGui import QColor, QPalette, QFont
+from PySide6.QtGui import (
+    QColor, QPalette, QFont, QKeySequence, QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableView, QLineEdit, QLabel, QAbstractItemView, QHeaderView,
     QToolButton, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu,
+    QRubberBand,
 )
 
 from .constants import (
@@ -195,6 +199,289 @@ class _FilterEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+# ===================================================== lasso + typeahead
+class LassoTableView(QTableView):
+    """QTableView with rubber-band lasso selection and keyboard typeahead.
+
+    Lasso
+    -----
+    Press on empty space and drag: a rubber band follows the cursor. Every
+    row whose viewport rectangle intersects the band is selected. Ctrl held
+    at press time makes the lasso additive (existing selection is preserved).
+
+    Edge auto-scroll uses the "row-fraction" math: for a pointer `p` px
+    inside the EDGE_HOT band,
+
+        frac = p / row_height_px        (in *rows*, not pixels)
+        frac = min(frac, EDGE_MAX_FRAC) (clamp fast flings)
+
+    ``frac`` is the number of rows-per-tick to scroll; a sub-row accumulator
+    turns that into actual scrollbar moves so a shallow drag still moves the
+    view smoothly instead of jerking one row at a time.
+
+    Typeahead
+    ---------
+    Printable chars build a buffer that resets after TYPE_RESET_MS. The
+    effective query is the buffer, except when it is all one character, in
+    which case it is a single-char query that advances one hit per press.
+    """
+
+    DRAG_THRESHOLD = 4        # px before the rubber band appears
+    EDGE_HOT       = 22       # px from an edge that starts auto-scroll
+    EDGE_MAX_FRAC  = 3.0      # cap on rows scrolled per tick
+    EDGE_TICK_MS   = 28       # ~35 ticks/sec — smooth but not too fast
+    TYPE_RESET_MS  = 700
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # --- lasso state ---------------------------------------------
+        self._press_pt = None            # QPoint press origin (viewport)
+        self._press_idx_row = -1
+        self._press_mods = Qt.NoModifier
+        self._lassoing = False
+        self._lasso_mods = Qt.NoModifier
+        self._base_selection = []        # rows selected when lasso began
+
+        self._rubber = QRubberBand(QRubberBand.Rectangle, self.viewport())
+        self._rubber.hide()
+
+        # --- edge auto-scroll state ----------------------------------
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setInterval(self.EDGE_TICK_MS)
+        self._edge_timer.timeout.connect(self._edge_tick)
+        self._scroll_dir = 0             # -1 up, +1 down, 0 none
+        self._scroll_frac = 0.0          # rows per tick
+        self._scroll_accum = 0.0
+
+        # --- typeahead state -----------------------------------------
+        self._type_buf = ""
+        self._type_timer = QTimer(self)
+        self._type_timer.setSingleShot(True)
+        self._type_timer.setInterval(self.TYPE_RESET_MS)
+        self._type_timer.timeout.connect(self._reset_type_buf)
+
+    # ----------------------------------------------------- small helpers
+    def _row_height_px(self):
+        vh = self.verticalHeader()
+        m = self.model()
+        if m is not None and m.rowCount() > 0:
+            h = vh.sectionSize(0)
+            if h > 0:
+                return h
+        d = vh.defaultSectionSize()
+        return d if d > 0 else 24
+
+    def _selected_rows(self):
+        sel = self.selectionModel()
+        if sel is None:
+            return []
+        return [i.row() for i in sel.selectedRows(0)]
+
+    # ---------------------------------------------------------- mouse
+    def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            super().mousePressEvent(event)
+            return
+        pt = event.position().toPoint()
+        idx = self.indexAt(pt)
+        if idx.isValid():
+            # Row press -> normal Qt handling (click / modifier / drag-range).
+            self._press_pt = None
+            self._press_idx_row = -1
+            super().mousePressEvent(event)
+            return
+        # Empty-space press: begin potential lasso.
+        self.setFocus(Qt.MouseFocusReason)
+        self._press_pt = pt
+        self._press_idx_row = -1
+        self._press_mods = event.modifiers()
+        if not (self._press_mods & (Qt.ControlModifier | Qt.ShiftModifier)):
+            self.clearSelection()
+        self._lassoing = False
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._press_pt is None:
+            super().mouseMoveEvent(event)
+            return
+        pt = event.position().toPoint()
+        if not self._lassoing:
+            if (pt - self._press_pt).manhattanLength() < self.DRAG_THRESHOLD:
+                event.accept()
+                return
+            self._lassoing = True
+            self._lasso_mods = self._press_mods
+            self._base_selection = list(self._selected_rows())
+        rect = self._lasso_rect(self._press_pt, pt)
+        self._rubber.setGeometry(rect)
+        if not self._rubber.isVisible():
+            self._rubber.show()
+        self._apply_lasso(rect)
+        self._update_edge_scroll(pt)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+        if self._lassoing:
+            self._finish_lasso()
+            event.accept()
+            return
+        if self._press_pt is not None:
+            # Plain empty-space click -> deselect (already cleared on press).
+            self._press_pt = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _lasso_rect(self, a, b):
+        r = QRect(a, b).normalized()
+        return r.intersected(self.viewport().rect())
+
+    def _apply_lasso(self, rect):
+        model = self.model()
+        sel = self.selectionModel()
+        if model is None or sel is None:
+            return
+        w = self.viewport().width()
+        hit = set()
+        for r in range(model.rowCount()):
+            top = self.rowViewportPosition(r)
+            h = self.rowHeight(r)
+            if h <= 0:
+                continue
+            if QRect(0, top, w, h).intersects(rect):
+                hit.add(r)
+        if self._lasso_mods & Qt.ControlModifier:
+            rows = set(self._base_selection) | hit
+        else:
+            rows = hit
+        if not rows:
+            sel.clearSelection()
+            return
+        qsel = QItemSelection()
+        last_col = model.columnCount() - 1
+        for r in sorted(rows):
+            qsel.select(model.index(r, 0), model.index(r, last_col))
+        sel.select(qsel, QItemSelectionModel.ClearAndSelect)
+
+    def _finish_lasso(self):
+        self._lassoing = False
+        self._rubber.hide()
+        self._edge_timer.stop()
+        self._scroll_dir = 0
+        self._scroll_frac = 0.0
+        self._scroll_accum = 0.0
+        self._press_pt = None
+        self._base_selection = []
+
+    # ------------------------------------------------ edge auto-scroll
+    def _update_edge_scroll(self, pt):
+        y = pt.y()
+        h = self.viewport().height()
+        zone = self.EDGE_HOT
+        new_dir = 0
+        frac = 0.0
+        if y < zone:
+            overshoot = zone - y
+            frac = overshoot / max(self._row_height_px(), 1)
+            if frac > self.EDGE_MAX_FRAC:
+                frac = self.EDGE_MAX_FRAC
+            new_dir = -1
+        elif y > h - zone:
+            overshoot = y - (h - zone)
+            frac = overshoot / max(self._row_height_px(), 1)
+            if frac > self.EDGE_MAX_FRAC:
+                frac = self.EDGE_MAX_FRAC
+            new_dir = 1
+        if new_dir == 0:
+            self._edge_timer.stop()
+            self._scroll_dir = 0
+            self._scroll_frac = 0.0
+            self._scroll_accum = 0.0
+            return
+        if new_dir != self._scroll_dir:
+            self._scroll_accum = 0.0
+        self._scroll_dir = new_dir
+        self._scroll_frac = frac
+        if not self._edge_timer.isActive():
+            self._edge_timer.start()
+
+    def _edge_tick(self):
+        if not self._lassoing or self._scroll_dir == 0 or self._scroll_frac <= 0.0:
+            self._edge_timer.stop()
+            return
+        self._scroll_accum += self._scroll_frac
+        sb = self.verticalScrollBar()
+        moved = 0
+        while self._scroll_accum >= 1.0:
+            self._scroll_accum -= 1.0
+            if self._scroll_dir < 0:
+                if sb.value() <= sb.minimum():
+                    self._scroll_accum = 0.0
+                    self._edge_timer.stop()
+                    break
+                sb.setValue(sb.value() - 1)
+            else:
+                if sb.value() >= sb.maximum():
+                    self._scroll_accum = 0.0
+                    self._edge_timer.stop()
+                    break
+                sb.setValue(sb.value() + 1)
+            moved += 1
+        if moved:
+            self._apply_lasso(self._rubber.geometry())
+
+    # ------------------------------------------------------- typeahead
+    def _reset_type_buf(self):
+        self._type_buf = ""
+
+    def _handle_typeahead(self, event):
+        if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier
+                                | Qt.MetaModifier):
+            return False
+        text = event.text()
+        if not text or not text.isprintable() or text == " ":
+            return False
+        model = self.model()
+        if model is None or not hasattr(model, "rows") or not model.rows:
+            return False
+        self._type_buf = self._type_buf + text.lower()
+        self._type_timer.start()
+        buf = self._type_buf
+        same = len(buf) >= 2 and all(c == buf[0] for c in buf)
+        query = buf[0] if same else buf
+        n = len(model.rows)
+        cur = self.currentIndex().row()
+        if cur < 0:
+            cur = 0
+        start = (cur + 1) if same else cur
+        for i in range(n):
+            r = (start + i) % n
+            if model.rows[r].name.lower().startswith(query):
+                idx = model.index(r, 0)
+                self.selectionModel().setCurrentIndex(
+                    idx,
+                    QItemSelectionModel.ClearAndSelect
+                    | QItemSelectionModel.Rows)
+                self.scrollTo(idx, QAbstractItemView.EnsureVisible)
+                return True
+        return True
+
+    # --------------------------------------------------- key handling
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self._lassoing:
+            self._finish_lasso()
+            event.accept()
+            return
+        if self._handle_typeahead(event):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 # =============================================================== Sidebar
 class _SidebarUsageSignals(QObject):
     """Carrier for the drive-usage worker -> UI signal (Qt-friendly)."""
@@ -235,6 +522,7 @@ class Sidebar(QTreeWidget):
 
     The widget itself stays dumb: it emits:
         * ``navigateTo(path)``         on click / Enter
+        * ``escapePressed``            on Escape
         * ``unpinFromSidebar(path)``   on Delete
         * ``contextMenuRequested(path, global_pos)``
 
@@ -244,6 +532,7 @@ class Sidebar(QTreeWidget):
     """
 
     navigateTo = Signal(str)
+    escapePressed = Signal()
     unpinFromSidebar = Signal(str)
     contextMenuRequested = Signal(str, object)  # path, QPoint (global)
 
@@ -284,6 +573,10 @@ class Sidebar(QTreeWidget):
         self.contextMenuRequested.emit(path, self.viewport().mapToGlobal(pos))
 
     def keyPressEvent(self, event):
+        # Esc -> back to the file list.
+        if event.key() == Qt.Key_Escape:
+            self.escapePressed.emit()
+            return
         # Delete -> unpin the selected entry.
         if event.key() == Qt.Key_Delete:
             item = self.currentItem()
@@ -407,7 +700,7 @@ class FileManager(QMainWindow):
         self._filter_timer.setInterval(150)
         self._filter_timer.timeout.connect(self._apply_filter_debounced)
 
-        # Tabs are stubbed at step 1/2; real switch arrives in step 4.
+        # Tabs are stubbed at step 3; real switch arrives in step 4.
         self.tabs = [Tab()]
         self.cur = 0
 
@@ -492,11 +785,12 @@ class FileManager(QMainWindow):
         self.sidebar.setMinimumWidth(160)
         self.sidebar.setMaximumWidth(520)
         self.sidebar.navigateTo.connect(self._on_sidebar_navigate)
+        self.sidebar.escapePressed.connect(self.focus_tree)
         self.sidebar.unpinFromSidebar.connect(self._on_sidebar_unpin)
         self.sidebar.contextMenuRequested.connect(self._on_sidebar_context)
 
         self.model = FileListModel(self)
-        self.view = QTableView()
+        self.view = LassoTableView()
         self.view.setModel(self.model)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -529,6 +823,13 @@ class FileManager(QMainWindow):
         self.status = QLabel("")
         self.status.setObjectName("StatusLabel")
         v.addWidget(self.status)
+
+        # --- path/filter/sidebar shortcuts -----------------------------
+        # Step 5 will replace these with ACTION_DEFS-driven QShortcuts; for
+        # now they are the only key bindings the app installs globally.
+        QShortcut(QKeySequence("Ctrl+L"), self, self.focus_path)
+        QShortcut(QKeySequence("Ctrl+F"), self, self.focus_filter)
+        QShortcut(QKeySequence("Ctrl+B"), self, self.toggle_sidebar_focus)
 
     # ----------------------------------------------------------- theme
     def apply_theme(self):
@@ -710,7 +1011,7 @@ class FileManager(QMainWindow):
         # Keep the sidebar in sync so it reflects the current location.
         if getattr(self, "sidebar", None) is not None:
             self.sidebar.sync_selection(target)
-        # save_tab is a stub at step 1/2; wired in step 4.
+        # save_tab is a stub at step 3; wired in step 4.
         return True
 
     def reload(self):
@@ -810,10 +1111,22 @@ class FileManager(QMainWindow):
 
     def on_filter_escape(self):
         self.filter_edit.clear()
+        # Rebuild immediately; the debounced pass (also queued by clear())
+        # is a harmless no-op because set_rows dedupes identical row lists.
+        self.apply_filter_and_sort()
         self.view.setFocus()
 
     def focus_tree(self):
         self.view.setFocus()
+
+    def toggle_sidebar_focus(self):
+        """Ctrl+B: jump to the sidebar, and back when already there."""
+        if self.sidebar.hasFocus():
+            self.view.setFocus()
+            return
+        self.sidebar.setFocus()
+        if self.cwd:
+            self.sidebar.sync_selection(self.cwd)
 
     # --------------------------------------------------------- navigation
     def go_parent(self):
