@@ -1,10 +1,10 @@
 """keyfm UI - PySide6 port.
 
-Step 3 (with follow-up fixes) of the mandatory iteration protocol:
-    path/filter shortcuts (Ctrl+L / Ctrl+F / Ctrl+B), typeahead, the lasso
-    (rubber-band selection) with faithful row-fraction edge auto-scroll,
-    consistent sidebar hover highlighting, and a threaded system-wide search
-    when the filter box is used inside THIS PC.
+Step 4 of the mandatory iteration protocol:
+    tabs - tab strip widget, Save / Load / Restore view per tab,
+    new tab (Ctrl+T), close tab (Ctrl+W), next/prev (Ctrl+Tab /
+    Ctrl+Shift+Tab / Ctrl+PgDn / Ctrl+PgUp), jump to Alt+1..9, and a
+    double-click on empty tab-strip space creates a new tab.
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -33,16 +33,17 @@ STEP 2 (done): sidebar, QUICK ACCESS pins, THIS PC, drive usage threads,
                sidebar context menu, Delete-to-unpin, ★ button.
 STEP 3 (done): path/filter shortcuts, typeahead, lasso (rubber-band
                selection) with row-fraction edge auto-scroll.
-STEP 3b (this file): sidebar hover fix + threaded system-wide search in
+STEP 3b (done): sidebar hover fix + threaded system-wide search in
                THIS PC (QThread, os.walk, streamed results).
-STEP 4 (next):      Tab model save/load, tab strip widget, Alt+N, close.
-STEP 5:             menus, ACTION_DEFS bindings, QShortcut, shortcuts dialog,
-                    capture dialog, reset_all.
-STEP 6:             context menus, rename / new file / new folder /
-                    properties dialogs.
-STEP 7:             open-with dialog, cfg["assoc"] persistence, Windows
-                    chooser.
-STEP 8:             apply_theme polish, both LIGHT and DARK.
+STEP 4 (this file): tabs (Tab strip, save/load/restore, Ctrl+T, Ctrl+W,
+               Ctrl+Tab family, Alt+1..9).
+STEP 5 (next): menus, ACTION_DEFS bindings, QShortcut, shortcuts dialog,
+               capture dialog, reset_all.
+STEP 6:        context menus, rename / new file / new folder /
+               properties dialogs.
+STEP 7:        open-with dialog, cfg["assoc"] persistence, Windows
+               chooser.
+STEP 8:        apply_theme polish, both LIGHT and DARK.
 """
 import os
 import re
@@ -64,7 +65,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableView, QLineEdit, QLabel, QAbstractItemView, QHeaderView,
     QToolButton, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu,
-    QRubberBand,
+    QRubberBand, QTabBar,
 )
 
 from .constants import (
@@ -207,6 +208,47 @@ class _FilterEdit(QLineEdit):
             self.downPressed.emit()
             return
         super().keyPressEvent(event)
+
+
+# =============================================================== tab strip
+class TabStrip(QTabBar):
+    """The horizontal tab strip above the toolbar.
+
+    Emits:
+        * ``newTabRequested``            on double-click in empty space
+        * ``switched(index)``            on user-driven current change
+        * ``closeRequested(index)``      on the per-tab close button
+
+    Reordering is disabled in step 4 (would need a tabMoved -> self.tabs
+    sync); it can come back later without changing the rest of the design.
+    """
+
+    newTabRequested = Signal()
+    switched = Signal(int)
+    closeRequested = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("TabStrip")
+        self.setExpanding(False)
+        self.setMovable(False)
+        self.setTabsClosable(True)
+        self.setDocumentMode(True)
+        self.setDrawBase(False)
+        self.setElideMode(Qt.ElideRight)
+        self.setUsesScrollButtons(True)
+        self.setFocusPolicy(Qt.NoFocus)     # Ctrl+Tab works from the view
+        self.currentChanged.connect(self.switched)
+        self.tabCloseRequested.connect(self.closeRequested)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pt = event.position().toPoint()
+            if self.tabAt(pt) == -1:
+                self.newTabRequested.emit()
+                event.accept()
+                return
+        super().mouseDoubleClickEvent(event)
 
 
 # ================================================= system-wide search
@@ -823,6 +865,12 @@ class FileManager(QMainWindow):
         self._search_truncated = False
         self._retired = []            # cancelled threads still winding down
 
+        # ---- tabs ----------------------------------------------------
+        self.tabs = [Tab()]
+        self.cur = 0
+        self._switching_tab = False
+        self.tab_bar = None           # created by _build_ui
+
         # Flash timer (status-bar override), replaced by QTimer.
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -833,10 +881,6 @@ class FileManager(QMainWindow):
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(150)
         self._filter_timer.timeout.connect(self._apply_filter_debounced)
-
-        # Tabs are stubbed at step 3; real switch arrives in step 4.
-        self.tabs = [Tab()]
-        self.cur = 0
 
         # ---- window --------------------------------------------------
         self.setWindowTitle(APP)
@@ -882,8 +926,15 @@ class FileManager(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
         v = QVBoxLayout(central)
-        v.setContentsMargins(8, 8, 8, 6)
+        v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(6)
+
+        # --- tab strip --------------------------------------------------
+        self.tab_bar = TabStrip()
+        self.tab_bar.newTabRequested.connect(self._on_new_tab_requested)
+        self.tab_bar.switched.connect(self._on_tab_switched)
+        self.tab_bar.closeRequested.connect(self._on_tab_close_requested)
+        v.addWidget(self.tab_bar)
 
         # --- toolbar row ------------------------------------------------
         top = QHBoxLayout()
@@ -964,6 +1015,20 @@ class FileManager(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self, self.focus_path)
         QShortcut(QKeySequence("Ctrl+F"), self, self.focus_filter)
         QShortcut(QKeySequence("Ctrl+B"), self, self.toggle_sidebar_focus)
+
+        # --- tab shortcuts (defaults from keys.ACTION_DEFS) ------------
+        QShortcut(QKeySequence("Ctrl+T"), self, self.new_tab)
+        QShortcut(QKeySequence("Ctrl+W"), self, self.close_tab)
+        QShortcut(QKeySequence("Ctrl+Tab"), self, self.next_tab)
+        QShortcut(QKeySequence("Ctrl+Shift+Tab"), self, self.prev_tab)
+        QShortcut(QKeySequence("Ctrl+PgDown"), self, self.next_tab)
+        QShortcut(QKeySequence("Ctrl+PgUp"), self, self.prev_tab)
+        for _n in range(1, 10):
+            QShortcut(QKeySequence(f"Alt+{_n}"), self,
+                      lambda _idx=_n - 1: self.switch_tab(_idx))
+
+        # Initial sync of the strip with the (single) empty tab.
+        self._rebuild_tab_strip()
 
     # ----------------------------------------------------------- theme
     def apply_theme(self):
@@ -1054,6 +1119,37 @@ class FileManager(QMainWindow):
             }}
             QSplitter::handle:hover {{
                 background: {P['hover']};
+            }}
+            QTabBar#TabStrip {{
+                background: transparent;
+                qproperty-drawBase: 0;
+            }}
+            QTabBar#TabStrip::tab {{
+                background: {P['tab']};
+                color: {P['dim']};
+                border: 1px solid {P['border']};
+                border-bottom: none;
+                padding: 5px 12px;
+                margin-right: 2px;
+                border-top-left-radius: 5px;
+                border-top-right-radius: 5px;
+                min-width: 90px;
+            }}
+            QTabBar#TabStrip::tab:selected {{
+                background: {P['tab_sel']};
+                color: {P['fg']};
+            }}
+            QTabBar#TabStrip::tab:hover:!selected {{
+                background: {P['hover']};
+                color: {P['fg']};
+            }}
+            QTabBar#TabStrip::close-button {{
+                background: transparent;
+                border: none;
+                border-radius: 2px;
+            }}
+            QTabBar#TabStrip::close-button:hover {{
+                background: {P['danger']};
             }}
         """)
 
@@ -1151,7 +1247,8 @@ class FileManager(QMainWindow):
         # Keep the sidebar in sync so it reflects the current location.
         if getattr(self, "sidebar", None) is not None:
             self.sidebar.sync_selection(target)
-        # save_tab is a stub at step 3; wired in step 4.
+        # Persist the tab state now that cwd / sort etc. have settled.
+        self.save_tab()
         return True
 
     def reload(self):
@@ -1391,6 +1488,208 @@ class FileManager(QMainWindow):
             dest = self.fwd.pop()
             self.navigate(dest, record=False)
 
+    # ------------------------------------------------------------ tabs
+    def _tab_label(self, t):
+        if not t.cwd:
+            return "Home"
+        if t.cwd == THIS_PC:
+            return "This PC"
+        if t.cwd == RECYCLE:
+            return "Recycle Bin"
+        return os.path.basename(t.cwd.rstrip(os.sep)) or t.cwd
+
+    def _rebuild_tab_strip(self):
+        """Full sync of the QTabBar to self.tabs.
+
+        Rebuilds from scratch so removing a *middle* tab doesn't leave the
+        strip showing the wrong children. Cheap for the tab counts we care
+        about (<= a few dozen). Signals are blocked to avoid recursion with
+        the currentChanged handler.
+        """
+        tb = self.tab_bar
+        if tb is None:
+            return
+        self._switching_tab = True
+        try:
+            tb.blockSignals(True)
+            while tb.count() > 0:
+                tb.removeTab(0)
+            for t in self.tabs:
+                i = tb.addTab(self._tab_label(t))
+                tb.setTabToolTip(i, t.cwd or "")
+            if 0 <= self.cur < tb.count():
+                tb.setCurrentIndex(self.cur)
+        finally:
+            tb.blockSignals(False)
+            self._switching_tab = False
+
+    def _update_current_tab_label(self):
+        tb = self.tab_bar
+        if tb is None:
+            return
+        if not (0 <= self.cur < tb.count()):
+            return
+        t = self.tabs[self.cur]
+        tb.setTabText(self.cur, self._tab_label(t))
+        tb.setTabToolTip(self.cur, t.cwd or "")
+
+    def _sync_tab_bar_current(self):
+        """Fast path: only adjust currentIndex, no rebuild."""
+        tb = self.tab_bar
+        if tb is None:
+            return
+        if not (0 <= self.cur < tb.count()):
+            return
+        self._switching_tab = True
+        try:
+            tb.blockSignals(True)
+            tb.setCurrentIndex(self.cur)
+        finally:
+            tb.blockSignals(False)
+            self._switching_tab = False
+
+    def _selected_items(self):
+        sm = self.view.selectionModel()
+        if sm is None:
+            return []
+        return [self.shown[i.row()] for i in sm.selectedRows(0)
+                if 0 <= i.row() < len(self.shown)]
+
+    def _focus_item_name(self):
+        idx = self.view.currentIndex()
+        if idx.isValid() and 0 <= idx.row() < len(self.shown):
+            return self.shown[idx.row()].name
+        return None
+
+    def save_tab(self):
+        """Store the live view state into self.tabs[self.cur]."""
+        if not self.tabs or not (0 <= self.cur < len(self.tabs)):
+            return
+        t = self.tabs[self.cur]
+        t.cwd = self.cwd
+        t.back = list(self.back)
+        t.fwd = list(self.fwd)
+        t.sort_col = self.sort_col
+        t.sort_reverse = self.sort_reverse
+        t.filter = self.filter_edit.text()
+        t.sel = [it.name for it in self._selected_items()]
+        t.focus = self._focus_item_name()
+        self._update_current_tab_label()
+
+    def load_tab(self, t):
+        """Restore the live view from a Tab object."""
+        self._cancel_search()
+        self._suppress_filter = True
+        try:
+            self.filter_edit.setText(t.filter)
+        finally:
+            self._suppress_filter = False
+        self.back = list(t.back)
+        self.fwd = list(t.fwd)
+        self.sort_col = t.sort_col
+        self.sort_reverse = t.sort_reverse
+        target = t.cwd or os.path.expanduser("~")
+        if not self.navigate(target, record=False):
+            self.navigate(os.path.expanduser("~"), record=False)
+        self.restore_view(t.sel, t.focus)
+        self.view.setFocus()
+
+    def restore_view(self, sel, foc):
+        """Rebuild selection / current row by item name (paths move)."""
+        sm = self.view.selectionModel()
+        if sm is None:
+            return
+        names_sel = set(sel or [])
+        qsel = QItemSelection()
+        last_col = max(0, self.model.columnCount() - 1)
+        focus_row = -1
+        for r, it in enumerate(self.shown):
+            if it.name in names_sel:
+                qsel.select(self.model.index(r, 0),
+                            self.model.index(r, last_col))
+            if foc is not None and it.name == foc and focus_row < 0:
+                focus_row = r
+        if names_sel:
+            sm.select(qsel,
+                      QItemSelectionModel.ClearAndSelect
+                      | QItemSelectionModel.Rows)
+        if focus_row < 0 and self.shown:
+            focus_row = 0
+        if focus_row >= 0:
+            idx = self.model.index(focus_row, 0)
+            self.view.setCurrentIndex(idx)
+            self.view.scrollTo(idx, QAbstractItemView.EnsureVisible)
+        self.update_status()
+
+    def new_tab(self, cwd=None):
+        self.save_tab()
+        t = Tab()
+        t.cwd = cwd if cwd is not None else self.cwd
+        t.sort_col = self.sort_col
+        t.sort_reverse = self.sort_reverse
+        t.filter = ""
+        t.sel = []
+        t.focus = None
+        self.tabs.append(t)
+        self.cur = len(self.tabs) - 1
+        self._rebuild_tab_strip()
+        self.load_tab(self.tabs[self.cur])
+
+    def close_tab(self, index=None):
+        if index is None:
+            index = self.cur
+        if not (0 <= index < len(self.tabs)):
+            return
+        if len(self.tabs) <= 1:
+            self.flash("Cannot close the last tab")
+            return
+        self.save_tab()
+        was_current = (index == self.cur)
+        del self.tabs[index]
+        if was_current:
+            self.cur = min(index, len(self.tabs) - 1)
+            self._rebuild_tab_strip()
+            self.load_tab(self.tabs[self.cur])
+        else:
+            if self.cur > index:
+                self.cur -= 1
+            self._rebuild_tab_strip()
+
+    def switch_tab(self, index):
+        if not (0 <= index < len(self.tabs)):
+            return
+        if index == self.cur:
+            return
+        self.save_tab()
+        self.cur = index
+        self._sync_tab_bar_current()
+        self.load_tab(self.tabs[self.cur])
+
+    def next_tab(self):
+        if len(self.tabs) <= 1:
+            return
+        self.switch_tab((self.cur + 1) % len(self.tabs))
+
+    def prev_tab(self):
+        if len(self.tabs) <= 1:
+            return
+        self.switch_tab((self.cur - 1) % len(self.tabs))
+
+    def _on_new_tab_requested(self):
+        self.new_tab()
+
+    def _on_tab_switched(self, index):
+        if self._switching_tab:
+            return
+        if not (0 <= index < len(self.tabs)):
+            return
+        if index == self.cur:
+            return
+        self.switch_tab(index)
+
+    def _on_tab_close_requested(self, index):
+        self.close_tab(index)
+
     # --------------------------------------------------------- sidebar
     def _populate_sidebar(self):
         """Rebuild the sidebar tree from cfg + known folders + drives."""
@@ -1597,19 +1896,6 @@ class FileManager(QMainWindow):
             f"QToolButton {{ color: {color}; background: transparent; "
             f"border: none; padding: 2px 8px; }}"
         )
-
-    # ------------------------------------------------------- tabs (stub)
-    def save_tab(self):
-        # TODO step 4
-        pass
-
-    def load_tab(self, t):
-        # TODO step 4
-        pass
-
-    def restore_view(self, sel, foc):
-        # TODO step 4
-        pass
 
     # ----------------------------------------------------- status / flash
     def flash(self, text, ms=3000):
