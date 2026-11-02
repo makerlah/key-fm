@@ -1,0 +1,18 @@
+run_keyfm.pyw                                     
+Troubleshoot.txt
+keyfm/ 
+├── __init__.py
+├── __main__.py         # entry point (python -m keyfm)
+├── constants.py        # APP, IS_WIN, virtual names, column titles
+├── theme.py            # LIGHT / DARK dicts
+├── helpers.py          # pure functions (sizes, paths, clipboard, brk)
+├── keys.py             # ACTION_DEFS, key parsing
+├── models.py           # Item, Tab
+├── config.py           # load_config / save_config
+├── drives.py           # scan_drives, known_folders
+├── trash.py            # Recycle Bin / trash
+├── apps.py             # app discovery + launching
+└── ui.py               # the FileManager class (the big one)
+   
+
+	

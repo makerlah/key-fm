@@ -1,0 +1,21 @@
+HOW TO CHECK IF THE FILE STRUCTURE ISNT BROKEN
+
+1. Press Shift + Right click while inside keyfm1.3v2
+2. Click on Open PowerShell Windows here
+3. Run This Command :
+     py -c "import keyfm; from keyfm import ui; print('Success! Everything is connected.')"
+     If py doesn't work, try:
+     python3 -c "import keyfm; from keyfm import ui; print('Success! Everything is connected.')"
+4.  If the File structure is fine this should be the output 'Success! Everything is connected.'
+
+
+THE APP DOESNT LAUNCH
+
+1. Press Shift + Right click while inside keyfm1.3v2
+2. Click on Open PowerShell Windows here
+3. Run This Command :
+    py run_keyfm.py
+4. Look at the output
+5. If you are not technically experienced enough to understand the output then take an AI's help if even it cant find the issue, file an issue report in my github repo
+
+

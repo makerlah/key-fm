@@ -1,0 +1,255 @@
+BUGS CATEGORIZATION — keyfm
+==============================================================
+Version:  1.3.0
+Updated:  2026-11-01 (post-session-5 review)
+Next review:  when adding a feature / when someone complains
+File:      BUGS CATEGORIZATION — keyfm.txt
+
+LEGEND
+  🔴 RED     — data loss, crash in common path, app unusable
+  🟠 ORANGE  — visible/wrong behavior on a platform you use
+  🟢 GREEN   — edge case, cosmetic, rare config
+  ⚫ IGNORED — design choice, can't happen, won't fix
+  ✅ FIXED   — record of what changed (don't re-fix)
+
+SUMMARY
+  🔴 RED     0
+  🟠 ORANGE  1  (O-1: config clobbering — trigger = multi-instance)
+  🟢 GREEN   0
+  ⚫ IGNORED 7  (design / false positive / won't fix)
+  ✅ FIXED  34  (28 from Bugs.txt + 6 from session-5 review)
+
+  The 1 open ORANGE bug is a "fix if you need it" bug. It is
+  NOT a release blocker — keyfm works correctly as a single
+  instance. Only two-instances-running is affected.
+
+🔴 RED — fix now
+==============================================================
+(none — every red bug is fixed in 1.3.0)
+
+
+🟠 ORANGE — fix before next release
+==============================================================
+[O-1] Two instances clobber each other's config
+      Source:  Bugs.txt #23 (was never fixed)
+      File:    config.py — save_config() / load_config()
+      Symptom: Run two keyfm windows → the second save wipes
+               the first instance's pins / assoc / key bindings
+      Cause:   No file locking around read-modify-write
+      Fix:     fcntl.flock (POSIX) / msvcrt.locking (Windows)
+               around load+save, OR skip if multi-instance is
+               not a real use case
+      Trigger: if I ever support two windows / run keyfm twice
+               myself / user reports lost pins
+
+
+🟢 GREEN — note, don't fix rn
+==============================================================
+(none open — see IGNORED for the ones that were green but
+have no user-visible impact at all)
+
+
+⚫ IGNORED — not bugs / won't fix
+==============================================================
+[I-1]  #18  Dedup by filename in linux_apps
+       Reason: Intentional XDG-precedence behavior. Fixed #1
+               makes this correct. Not a bug.
+[I-2]  #29  "Recycle Bin" entry shown on non-Windows
+       Reason: False positive. RECYCLE is a virtual path; the
+               scan_trash() handler works on all platforms.
+[I-3]  #30  win_drive_roots "dead code" — FALSE POSITIVE
+       Reason: Actually used by trash.py → scan_trash().
+               Not dead. Original Bugs.txt review was wrong.
+[I-4]  #33  Terminal=true apps excluded
+       Reason: Design choice. vim/htop don't belong in "Open
+               With" for a file manager.
+[I-5]  #34  MimeType not used for filtering
+       Reason: Feature request, not a bug. Whole "Open With"
+               list is intentionally unfiltered.
+[I-6]  #31  Unhandled drive types (partially) — already covered
+       Reason: code now maps 6 → "RAM Disk". Anything else is
+               cosmetic. Not worth another pass.
+[I-7]  #19  mac_apps not fully recursive (past depth 2)
+       Reason: Depth 2 catches /Applications/Adobe/Photoshop.app.
+               Depth 3+ (Plugins/foo.app) is exotic. Wait for
+               a Mac user to complain.
+
+
+✅ FIXED — record of what changed (don't re-fix)
+==============================================================
+Format: [ID] #orig  Short title — What changed
+        (file: function)
+
+── Session-5 review (new bugs found in 1.3.0) ────────────────
+
+[F-1]  NEW   %c regex crash in parse_desktop
+        Fix:   re.sub(r"%[cC]", lambda _m: name, q)
+        Why:   re.sub treats replacement as template → name with
+               \B, \1 etc. raised and killed ALL app discovery
+        File:  apps.py: parse_desktop()
+
+[F-2]  NEW   Browse… → .txt crash on Windows
+        Fix:   if app is None: showerror(...) ; return
+        Why:   app_from_file() returns None on Windows for
+               non-executables; run() indexed None["argv"]
+        File:  ui.py: open_with() → run()
+
+[F-3]  NEW   App Paths values with args mangled
+        Fix:   Parse first quoted token, not str(val).strip('"')
+        Why:   Registry values are `"path" --args`; strip() only
+               removes END quotes, leaves middle quote → isfile
+               fails → app silently dropped from Open With
+        File:  apps.py: win_apps()
+
+[F-4]  NEW   cwd from Path= not passed through (fixes #10 tail)
+        Fix:   launch_with(..., cwd=saved.get("cwd"))
+               + save cwd into assoc entry
+        Why:   parse_desktop captured Path= but nobody passed it
+               to subprocess.Popen; apps ran from wrong cwd
+        File:  ui.py: open_file() + open_with() → run()
+
+[F-5]  NEW   flash() never clears (bug since 1.0)
+        Fix:   self.root.after(ms, self.update_status) with
+               after_cancel() of previous timer
+        Why:   ms parameter was ignored; _flash_job field was
+               declared but never used. Stale status for hours.
+        File:  ui.py: flash()
+
+[F-6]  NEW   _pack_ = 1 on 32-bit Windows
+        Fix:   _pack_ = 4 on 32-bit (1 → 4)
+        Why:   Windows ABI uses pack(4); struct offsets were
+               2 bytes early for the last 3 fields
+        Impact: zero (all those fields were 0 in win_recycle)
+        Status: fixed anyway, but effectively IGNORED — no
+                user will ever hit it. See #36 note.
+        File:  trash.py: SHFILEOPSTRUCTW
+
+── Bugs.txt originals — fixed (some in 1.0, some during
+   1.3.0 work, some in session 5) ────────────────────────────
+
+[F-7]  #1   Broken user .desktop hides working system copy
+        Fix:  seen.add(fn) only after parse_desktop() succeeds
+        File: apps.py: linux_apps()
+
+[F-8]  #2   Corrupt assoc entries crash launcher
+        Fix:  _valid_assoc rejects empty name / empty argv /
+              non-string argv items
+        File: config.py: _valid_assoc()
+
+[F-9]  #3   %c / %i deleted instead of expanded
+        Fix:  %c/%C → app name (lambda wrap, see F-1),
+              %i → --icon <icon> pair, embedded %i dropped
+        File: apps.py: parse_desktop()
+
+[F-10] #4   Windows launch of non-.exe files
+        Fix:  POSIX-only "file is the launcher"; Windows wraps
+              .bat/.cmd in cmd.exe /c, .ps1 in powershell -File,
+              everything else → None
+        File: apps.py: app_from_file()
+
+[F-11] #5   Non-atomic save loses config
+        Fix:  tempfile.mkstemp + os.replace
+        File: config.py: save_config()
+
+[F-12] #6   90 s PowerShell scan on every list_apps
+        Fix:  module-level _APPS_CACHE; force=True to refresh;
+              10 s timeout; failures cached
+        File: apps.py: win_apps() + list_apps()
+
+[F-13] #7   list_apps swallows exceptions silently
+        Fix:  traceback.print_exc() on failure; still returns
+              partial results
+        File: apps.py: list_apps() + win_apps()
+
+[F-14] #8   TryExec not checked
+        Fix:  skip entry if TryExec set and binary missing
+        File: apps.py: parse_desktop()
+
+[F-15] #9   OnlyShowIn / NotShowIn ignored
+        Fix:  read XDG_CURRENT_DESKTOP, skip mismatches
+        File: apps.py: parse_desktop()
+
+[F-16] #10  Path= (working dir) ignored
+        Fix:  capture Path into {"cwd": ...} (see F-4 for the
+              other half of this fix)
+        File: apps.py: parse_desktop() + launch_with()
+
+[F-17] #11  XDG user dirs not parsed on Linux/macOS
+        Fix:  parse $XDG_CONFIG_HOME/user-dirs.dirs,
+              map XDG_*_DIR → labels, fall back to ~/<label>
+        File: drives.py: _xdg_user_dirs()
+
+[F-18] #12  Empty $HOME basename pollutes /media
+        Fix:  rstrip("/") + `if user:` guard before adding
+              /media/<user> and /run/media/<user>
+        File: drives.py: scan_drives()
+
+[F-19] #13  app_from_file — trailing-slash / argv mismatch
+        Fix:  normalize fn once at top with rstrip("/\\")
+        File: apps.py: app_from_file()
+
+[F-20] #14  .tar.gz → foo.tar
+        Fix:  strip known double extensions (.tar.gz, .tar.bz2,
+              .tar.xz, .tar.zst) before splitext
+        File: apps.py: app_from_file()
+
+[F-21] #15  launch_with no error handling
+        Fix:  empty argv → False; OSError → False; on POSIX
+              start_new_session + DEVNULL streams
+        File: apps.py: launch_with()
+
+[F-22] #16  default_open no error handling
+        Fix:  try/except OSError; shutil.which("xdg-open") guard
+              on Linux
+        File: apps.py: default_open()
+
+[F-23] #17  Empty-string argument preserved
+        Fix:  `if q == "": continue` (removed `and p != ""`)
+        File: apps.py: parse_desktop()
+
+[F-24] #20  UTF-8 BOM breaks json.load
+        Fix:  encoding="utf-8-sig" on read
+        File: config.py: load_config()
+
+[F-25] #21  Old pin file not cleaned up after migration
+        Fix:  os.unlink(OLD_PIN_FILE) guarded by try/except OSError
+        File: config.py: load_config()
+
+[F-26] #22  Config file not private
+        Fix:  os.chmod(CONFIG_FILE, 0o600) after os.replace
+        File: config.py: save_config()
+
+[F-27] #24  Version string not PEP 440
+        Fix:  __version__ = "1.3.0" (moved note to changelog)
+        File: __init__.py
+
+[F-28] #25  root not destroyed on exception
+        Fix:  try/finally around FileManager(root) + mainloop()
+        File: __main__.py: main()
+
+[F-29] #26  No --help / --version
+        Fix:  handle -h / --help and -V / --version before Tk
+        File: __main__.py: main()
+
+[F-30] #27  start_dir not validated
+        Fix:  expanduser; if not isdir → fall back to ~
+        File: __main__.py: main()
+
+[F-31] #28  PC_TITLES empty-string titles
+        Fix:  None means "hide column"; update_headings() filters
+        File: constants.py + ui.py: update_headings()
+
+[F-32] #32  macOS volume duplication (/ and /Volumes/Macintosh HD)
+        Fix:  compare st_dev + st_ino against /; skip matches
+        File: drives.py: scan_drives()
+
+[F-33] #35  IS_WIN duplicated
+        Fix:  apps.py imports IS_WIN from constants
+        File: apps.py
+
+[F-34] #36  32-bit Python → System32 redirection
+        Fix:  if sys.maxsize < 2**32 and Sysnative exists,
+              use it instead of System32
+        Why:  WOW64 redirects System32 reads from 32-bit
+              Python → Sysnative → missing notepad.exe
+        File: apps.py: win_apps()

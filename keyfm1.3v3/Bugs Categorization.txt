@@ -1,0 +1,28 @@
+BUGS Categorization 
+
+🔴 RED — fix now
+=====================================================
+(none currently — all known red bugs fixed in 1.3.0)
+
+🟠 ORANGE — fix before next release
+=====================================================
+[ID] Short title
+     File:      apps.py, function_name()
+     Symptom:   What the user sees
+     Cause:     One-line root cause
+     Fix idea:  One-line suggestion
+	 Trigger:   What would make this worth fixing
+     Found by:  session N / self / user report
+
+🟢 GREEN — note, don't fix rn but eventually one day
+=====================================================
+[ID] Short title
+     File:      ...
+     Symptom:   ...
+     Why green: "only affects 32-bit Windows" / "cosmetic" / etc.
+     Trigger:   What would make this worth fixing
+
+⚫ IGNORED — not bugs / won't fix
+=====================================================
+[ID] Short title
+     Reason:    Design choice / not reproducible / can't happen / far too obscure / im not dealing with this ever
