@@ -1,10 +1,11 @@
 """keyfm UI - PySide6 port.
 
-Step 6 of the mandatory iteration protocol:
-    context menus on the file list (right-click), the tab-strip "+" button,
-    and the working file operations behind the dispatch map: copy / cut /
-    paste / rename / delete / delete_perm / new file / new folder /
-    properties / restore (Recycle Bin) / empty bin.
+Step 7 of the mandatory iteration protocol:
+    Open-with dialog (async app list loader thread, live filter, "Always
+    use this app" persistence, "Forget saved app", "Browse…" via
+    QFileDialog, and the Windows chooser via os.startfile(path, "openas"))
+    plus cfg["assoc"] read/write wired into both the explicit Open-with
+    action and the Enter-key open path.
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -40,13 +41,14 @@ STEP 4 (done): tabs (Tab strip, save/load/restore, Ctrl+T, Ctrl+W,
 STEP 5 (done): menus, ACTION_DEFS-driven QShortcut bindings,
                shortcuts dialog (show_shortcuts), capture dialog
                (capture_key), conflict reassignment, reset_all.
-STEP 6 (this file): "+" button on the tab strip; list context menu;
+STEP 6 (done): "+" button on the tab strip; list context menu;
                copy / cut / paste / rename / delete / delete_perm /
                new file / new folder / properties / restore /
                empty bin implemented as real operations + PySide6 dialogs.
-STEP 7 (next): open-with dialog, cfg["assoc"] persistence, Windows
-               chooser.
-STEP 8:        apply_theme polish, both LIGHT and DARK.
+STEP 7 (this file): Open-with dialog, cfg["assoc"] persistence, Windows
+               chooser, async app loading in a QThread, Browse via
+               QFileDialog.
+STEP 8 (next): apply_theme polish, both LIGHT and DARK.
 """
 import os
 import re
@@ -69,7 +71,8 @@ from PySide6.QtWidgets import (
     QTableView, QLineEdit, QLabel, QAbstractItemView, QHeaderView,
     QToolButton, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu,
     QRubberBand, QTabBar, QDialog, QPushButton, QMessageBox,
-    QInputDialog, QFormLayout, QSizePolicy,
+    QInputDialog, QFormLayout, QSizePolicy, QCheckBox, QListWidget,
+    QListWidgetItem, QFileDialog, QDialogButtonBox,
 )
 
 from .constants import (
@@ -94,7 +97,7 @@ from .helpers import (
     # NOT be imported (per task instructions). Clipboard access goes
     # through QApplication.clipboard() instead.
 )
-from .apps import default_open
+from .apps import default_open, launch_with, list_apps
 
 
 # Default widths (px) used by the file list.
@@ -404,6 +407,329 @@ class TabStrip(QTabBar):
                 event.accept()
                 return
         super().mouseDoubleClickEvent(event)
+
+
+# ================================================= open-with (step 7)
+# Live references to app-loader threads so Python cannot GC them out from
+# under a running Qt thread (which would abort the process).
+_APP_LOADERS = set()
+
+
+class _AppLoaderThread(QThread):
+    """Discover installed apps in the background.
+
+    ``list_apps()`` can take 1-3 s on Windows (PowerShell WScript.Shell
+    enumeration) which would freeze the modal dialog. We run it once here
+    and stream the final list back on the GUI thread.
+    """
+
+    done = Signal(list)          # list[dict] of {"name": str, "argv": list}
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            apps = list_apps()
+        except Exception:
+            traceback.print_exc()
+            try:
+                self.failed.emit("Could not list installed applications")
+            except RuntimeError:
+                pass
+            return
+        try:
+            self.done.emit(apps)
+        except RuntimeError:
+            pass
+
+
+class OpenWithDialog(QDialog):
+    """Open-with chooser mirroring the Tkinter dialog.
+
+    Caller inspects ``chosen`` (app dict or None), ``always`` (bool), and
+    ``forget`` (bool) after ``exec()`` returns ``QDialog.Accepted``.
+    Persistence to ``cfg["assoc"]`` happens in :class:`FileManager`, so this
+    widget has no side effects on disk.
+    """
+
+    def __init__(self, path, name, ext, saved_assoc, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.name = name
+        self.ext = ext
+        self.saved_assoc = dict(saved_assoc) if saved_assoc else None
+        self.chosen = None            # {"name": ..., "argv": [...]}
+        self.always = False
+        self.forget = False
+        self._apps = []
+        self._thread = None
+        self.setWindowTitle(f"Open “{name}” with…")
+        self.setModal(True)
+        self.resize(560, 560)
+        self._build()
+
+    # ---------------------------------------------------------- UI build
+    def _build(self):
+        v = QVBoxLayout(self)
+        v.setContentsMargins(14, 14, 14, 12)
+        v.setSpacing(8)
+
+        title = QLabel(f"Open <b>{self.name}</b> with:")
+        title.setWordWrap(True)
+        v.addWidget(title)
+
+        self.filter = QLineEdit()
+        self.filter.setPlaceholderText("Filter applications…")
+        self.filter.setClearButtonEnabled(True)
+        self.filter.textChanged.connect(lambda *_: self._populate())
+        v.addWidget(self.filter)
+
+        self.list = QListWidget()
+        self.list.itemDoubleClicked.connect(
+            lambda *_: self._do_open())
+        v.addWidget(self.list, 1)
+
+        self.always_cb = QCheckBox(
+            f"Always use this app for {self.ext or 'files without extension'}")
+        if not self.ext:
+            # Windows/macOS use the ext for the association key; without one
+            # we can't safely persist. Keep the checkbox but disable it.
+            self.always_cb.setEnabled(False)
+            self.always_cb.setToolTip("Files without an extension cannot be "
+                                      "remembered.")
+        elif isinstance(self.saved_assoc, dict) and self.saved_assoc:
+            self.always_cb.setChecked(True)
+        v.addWidget(self.always_cb)
+
+        row1 = QHBoxLayout()
+        self.browse_btn = QPushButton("Browse…")
+        self.browse_btn.clicked.connect(self._do_browse)
+        row1.addWidget(self.browse_btn)
+        self.forget_btn = QPushButton("Forget saved app")
+        self.forget_btn.clicked.connect(self._do_forget)
+        self.forget_btn.setEnabled(bool(self.saved_assoc))
+        row1.addWidget(self.forget_btn)
+        row1.addStretch(1)
+        v.addLayout(row1)
+
+        if IS_WIN:
+            row2 = QHBoxLayout()
+            self.win_btn = QPushButton("Windows chooser…")
+            self.win_btn.setToolTip(
+                "Open the native Windows “Open with” dialog for this file. "
+                "Windows will remember your pick itself.")
+            self.win_btn.clicked.connect(self._do_windows_chooser)
+            row2.addWidget(self.win_btn)
+            row2.addStretch(1)
+            v.addLayout(row2)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.Open | QDialogButtonBox.Cancel, self)
+        btns.accepted.connect(self._do_open)
+        btns.rejected.connect(self.reject)
+        v.addWidget(btns)
+
+        # Start the async load only after the widgets exist.
+        self._start_loading()
+
+    # -------------------------------------------------------- async load
+    def _start_loading(self):
+        self.list.clear()
+        placeholder = QListWidgetItem("Loading applications…")
+        placeholder.setFlags(Qt.NoItemFlags)
+        self.list.addItem(placeholder)
+        self.list.setEnabled(False)
+
+        th = _AppLoaderThread()
+        _APP_LOADERS.add(th)
+        th.done.connect(self._on_apps_loaded)
+        th.failed.connect(self._on_apps_failed)
+
+        def _cleanup(t=th):
+            _APP_LOADERS.discard(t)
+
+        th.finished.connect(_cleanup)
+        self._thread = th
+        th.start()
+
+    def _on_apps_loaded(self, apps):
+        self._apps = list(apps) if apps else []
+        self.list.setEnabled(True)
+        self._populate()
+
+    def _on_apps_failed(self, msg):
+        self.list.setEnabled(True)
+        self.list.clear()
+        placeholder = QListWidgetItem(msg or "Could not list applications.")
+        placeholder.setFlags(Qt.NoItemFlags)
+        self.list.addItem(placeholder)
+
+    # ------------------------------------------------------------ populate
+    def _populate(self):
+        flt = self.filter.text().strip().lower()
+        self.list.blockSignals(True)
+        try:
+            self.list.clear()
+            for app in self._apps:
+                name = app.get("name") or ""
+                if flt and flt not in name.lower():
+                    continue
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, app)
+                self.list.addItem(item)
+            # Pre-select saved app or (if none) the first item.
+            target = None
+            if self.saved_assoc:
+                for i in range(self.list.count()):
+                    it = self.list.item(i)
+                    data = it.data(Qt.UserRole)
+                    if isinstance(data, dict) and self._same_app(
+                            data, self.saved_assoc):
+                        target = it
+                        break
+            if target is None and self.list.count() > 0:
+                target = self.list.item(0)
+            if target is not None:
+                self.list.setCurrentItem(target)
+                target.setSelected(True)
+                self.list.scrollToItem(target)
+        finally:
+            self.list.blockSignals(False)
+
+    @staticmethod
+    def _same_app(a, b):
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        a_argv = a.get("argv") or []
+        b_argv = b.get("argv") or []
+        if not a_argv or not b_argv:
+            return False
+        # Match on the executable path only — the {file} placeholder and
+        # any other trailing args can differ without meaning it's a
+        # different program.
+        return os.path.normcase(str(a_argv[0])) == \
+            os.path.normcase(str(b_argv[0]))
+
+    # --------------------------------------------------------- operations
+    def _do_open(self):
+        item = self.list.currentItem()
+        if item is None:
+            QMessageBox.information(
+                self, "Open with",
+                "Please pick an application first.")
+            return
+        app = item.data(Qt.UserRole)
+        if not isinstance(app, dict) or not app.get("argv"):
+            return
+        self.chosen = dict(app)
+        self.always = (self.always_cb.isChecked()
+                       and self.always_cb.isEnabled()
+                       and bool(self.ext))
+        self.accept()
+
+    def _do_browse(self):
+        start_dir = ""
+        if self.saved_assoc:
+            first = (self.saved_assoc.get("argv") or [""])[0]
+            if first and os.path.isfile(first):
+                start_dir = os.path.dirname(first)
+        if IS_WIN:
+            filters = "Applications (*.exe *.com *.bat *.cmd *.ps1);;All files (*)"
+        elif sys.platform == "darwin":
+            filters = "Applications (*.app);;All files (*)"
+        else:
+            filters = "All files (*)"
+        fn, _ = QFileDialog.getOpenFileName(
+            self, "Choose application", start_dir, filters)
+        if not fn:
+            return
+        if not os.path.isfile(fn):
+            return
+        if not IS_WIN and sys.platform != "darwin":
+            if not os.access(fn, os.X_OK):
+                if QMessageBox.question(
+                        self, "Not executable",
+                        f"{os.path.basename(fn)} does not look executable.\n"
+                        f"Use it anyway?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No) != QMessageBox.Yes:
+                    return
+        name = os.path.basename(fn)
+        app = {"name": name, "argv": [fn, "{file}"]}
+
+        # Cache into the in-memory list so it can be re-filtered, and
+        # clear the filter so it becomes visible.
+        already = any(self._same_app(a, app) for a in self._apps)
+        if not already:
+            self._apps.append(app)
+        self.filter.blockSignals(True)
+        try:
+            self.filter.clear()
+        finally:
+            self.filter.blockSignals(False)
+        self._populate()
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            data = item.data(Qt.UserRole)
+            if isinstance(data, dict) and self._same_app(data, app):
+                self.list.setCurrentItem(item)
+                item.setSelected(True)
+                self.list.scrollToItem(item)
+                break
+
+    def _do_forget(self):
+        if not self.saved_assoc:
+            return
+        if QMessageBox.question(
+                self, "Forget saved app",
+                f"Stop remembering the app for {self.ext or 'files without extension'}?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.forget = True
+        self.chosen = None
+        self.always = False
+        self.accept()
+
+    def _do_windows_chooser(self):
+        try:
+            os.startfile(self.path, "openas")
+        except OSError as err:
+            QMessageBox.warning(
+                self, "Windows chooser",
+                f"Could not open the Windows “Open with” dialog:\n{err}")
+            return
+        # Windows takes over from here; nothing to persist locally.
+        self.reject()
+
+    # ------------------------------------------------------------ dispose
+    def _shutdown_thread(self):
+        th = self._thread
+        self._thread = None
+        if th is None:
+            return
+        try:
+            th.done.disconnect(self._on_apps_loaded)
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            th.failed.disconnect(self._on_apps_failed)
+        except (RuntimeError, TypeError):
+            pass
+        # The thread keeps itself alive via _APP_LOADERS until it finishes,
+        # so we do NOT wait here — a slow app scan must not block the
+        # dialog close.
+
+    def closeEvent(self, event):
+        self._shutdown_thread()
+        super().closeEvent(event)
+
+    def accept(self):
+        self._shutdown_thread()
+        super().accept()
+
+    def reject(self):
+        self._shutdown_thread()
+        super().reject()
 
 
 class _SystemSearchThread(QThread):
@@ -1233,6 +1559,23 @@ class FileManager(QMainWindow):
                 background: {P['menu_active']};
                 color: {P['fg']};
             }}
+            QListWidget {{
+                background: {P['field']};
+                color: {P['fg']};
+                border: 1px solid {P['border']};
+                border-radius: 4px;
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 4px 8px;
+                border-radius: 2px;
+            }}
+            QListWidget::item:hover {{ background: {P['hover']}; }}
+            QListWidget::item:selected {{
+                background: {P['sel_bg']};
+                color: {P['sel_fg']};
+            }}
+            QCheckBox {{ color: {P['fg']}; }}
         """)
 
         if getattr(self, "sidebar", None) is not None:
@@ -1279,7 +1622,8 @@ class FileManager(QMainWindow):
         file_menu = mb.addMenu("&File")
         add(file_menu, "new_tab")
         add(file_menu, "close_tab")
-        add(file_menu, "open_with", sep_before=True)
+        add(file_menu, "open", sep_before=True)
+        add(file_menu, "open_with")
         add(file_menu, "properties")
         add(file_menu, "quit", sep_before=True)
 
@@ -1464,6 +1808,7 @@ class FileManager(QMainWindow):
     def _act_context_menu(self): self.do_context_menu()
     def _act_restore(self): self.do_restore()
     def _act_empty_bin(self): self.do_empty_bin()
+    def _act_open_with(self): self.do_open_with()
 
     # --- view
     def _act_sort_name(self): self.set_sort("name")
@@ -1531,6 +1876,21 @@ class FileManager(QMainWindow):
             return "File"
         return _KIND_BY_EXT.get(ext, f"{ext[1:].upper()} file")
 
+    def _assoc_for(self, name):
+        """Return the cfg["assoc"] entry for this filename, or None."""
+        ext = os.path.splitext(name)[1].lower()
+        return (self.cfg.get("assoc") or {}).get(ext), ext
+
+    def _forget_assoc(self, ext):
+        try:
+            assoc = self.cfg.get("assoc") or {}
+            if ext in assoc:
+                del assoc[ext]
+                save_config(self.cfg)
+        except (KeyError, OSError):
+            pass
+
+    # ------------------------------------------------------------- opening
     def open_current(self):
         it = self._current_item()
         if it is None:
@@ -1538,17 +1898,82 @@ class FileManager(QMainWindow):
         if it.is_dir:
             self.navigate(it.path)
             return
+
+        # 1. User's saved association for this extension wins.
+        saved, ext = self._assoc_for(it.name)
+        if saved and saved.get("argv"):
+            if launch_with(saved["argv"], it.path):
+                return
+            # Saved launcher no longer works — forget it, then fall through.
+            self._forget_assoc(ext)
+
+        # 2. OS default handler.
         try:
             if default_open(it.path):
                 return
         except Exception:
             traceback.print_exc()
-        self.flash(f"Could not open “{it.name}”")
+
+        # 3. Our own Open-with dialog (also handles cfg["assoc"] writes).
+        self.do_open_with()
 
     def open_current_folder(self):
         it = self._current_item()
         if it is not None and it.is_dir:
             self.navigate(it.path)
+
+    def do_open_with(self):
+        """Open-with dialog for the current (or selected single) file."""
+        items = self._selected_items()
+        if not items:
+            it = self._current_item()
+            if it is not None:
+                items = [it]
+        if not items:
+            self.flash("Nothing selected")
+            return
+        if len(items) > 1:
+            self.flash("Select one file to open with…")
+            return
+        it = items[0]
+        if it.is_dir:
+            self.flash("Pick a file, not a folder")
+            return
+        if not os.path.isfile(it.path):
+            self.flash("File does not exist")
+            return
+
+        saved, ext = self._assoc_for(it.name)
+        dlg = OpenWithDialog(it.path, it.name, ext, saved, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        # Forget was requested — drop the entry and don't launch.
+        if dlg.forget:
+            assoc = self.cfg.get("assoc") or {}
+            if ext in assoc:
+                del assoc[ext]
+                save_config(self.cfg)
+                self.flash(f"Forgot saved app for {ext or 'files'}")
+            return
+
+        chosen = dlg.chosen
+        if not chosen or not chosen.get("argv"):
+            return
+
+        # Persist if the user asked for it.
+        if dlg.always and ext:
+            self.cfg.setdefault("assoc", {})[ext] = {
+                "name": chosen.get("name") or os.path.basename(
+                    str(chosen["argv"][0])),
+                "argv": list(chosen["argv"]),
+            }
+            save_config(self.cfg)
+            self.flash(f"Saved “{self.cfg['assoc'][ext]['name']}” "
+                       f"for {ext} files")
+
+        if not launch_with(chosen["argv"], it.path):
+            self.flash(f"Could not launch “{chosen.get('name') or 'app'}”")
 
     def copy_path(self):
         items = self._selected_items()
@@ -1978,6 +2403,10 @@ class FileManager(QMainWindow):
         self._cancel_search(wait=True)
         for th in list(self._retired):
             th.wait(3000)
+        # Any app-loader threads we spawned must finish before the process
+        # exits (Qt aborts if a QThread is destroyed while running).
+        for th in list(_APP_LOADERS):
+            th.wait(3000)
         super().closeEvent(event)
 
     # ---------------------------------------------------------- filtering
@@ -2234,10 +2663,6 @@ class FileManager(QMainWindow):
         if not items:
             self.flash("Nothing selected")
             return
-        if self.cwd in VIRTUAL and any(not it.orig for it in items):
-            # Allow copy on Recycle Bin items to their real data — but a
-            # virtual drive entry has no real path to copy; refuse those.
-            pass
         self.clip = [(it.path, it.is_dir) for it in items
                      if os.path.lexists(it.path)]
         if not self.clip:
@@ -2476,6 +2901,13 @@ class FileManager(QMainWindow):
             form.addRow("Modified:", QLabel(fmt_time(it.mtime)))
         if it.orig:
             form.addRow("Original location:", QLabel(it.orig))
+        # Saved association (step 7).
+        if not it.is_dir:
+            saved, ext = self._assoc_for(it.name)
+            if saved and ext:
+                form.addRow(
+                    f"Opens with ({ext}):",
+                    QLabel(f"{saved.get('name') or 'saved app'}"))
         try:
             st = os.stat(it.path, follow_symlinks=False)
             form.addRow("Permissions:",
@@ -2597,7 +3029,6 @@ class FileManager(QMainWindow):
             self.flash("Recycle Bin emptied")
 
     def do_context_menu(self):
-        # Open the same menu at the current row (Shift+F10 / Menu).
         idx = self.view.currentIndex()
         if idx.isValid():
             rect = self.view.visualRect(idx)
@@ -2605,7 +3036,7 @@ class FileManager(QMainWindow):
         else:
             vp_pos = QPoint(8, 8)
         global_pos = self.view.viewport().mapToGlobal(vp_pos)
-        self._on_list_context(self.view.viewport().mapFromGlobal(global_pos))
+        self._on_list_context(self.view.mapFromGlobal(global_pos))
 
     # ------------------------------------------------------------ menus
     def _menu_item(self, menu, aid, label=None):
@@ -2622,7 +3053,6 @@ class FileManager(QMainWindow):
         return act
 
     def _on_list_context(self, pos):
-        # pos is in self.view coordinates (Qt::CustomContextMenu contract).
         try:
             global_pos = self.view.mapToGlobal(pos)
         except Exception:
