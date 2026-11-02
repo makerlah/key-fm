@@ -52,7 +52,9 @@ STEP 7 (done): Open-with dialog, cfg["assoc"] persistence, Windows
 STEP 7b (this file): Explorer-style context menu on the file list and
                sidebar; Shift+Right-Click → terminal; "Create shortcut";
                "Show Windows Context Menu" via ctypes IContextMenu.
-STEP 8 (next): apply_theme polish, both LIGHT and DARK.
+STEP 8 (done): apply_theme polish for LIGHT & DARK — emoji decorations
+               removed, rounded borders, refined header / menu styling,
+               padded inputs, modern section headers in the sidebar.
 """
 import os
 import re
@@ -82,7 +84,7 @@ from PySide6.QtWidgets import (
 
 from .constants import (
     APP, IS_WIN, THIS_PC, RECYCLE, VIRTUAL, COLS,
-    TITLES, PC_TITLES, BIN_TITLES, QUICK_ICONS,
+    TITLES, PC_TITLES, BIN_TITLES,
 )
 from .theme import LIGHT, DARK
 from .models import Item, Tab
@@ -267,8 +269,7 @@ class FileListModel(QAbstractTableModel):
         col = self.columns[index.column()]
         if role == Qt.DisplayRole:
             if col == "name":
-                prefix = "📁 " if row.is_dir else "📄 "
-                return prefix + row.name
+                return row.name
             if col == "where":
                 return row.orig or ""
             if col == "size":
@@ -1135,13 +1136,15 @@ class Sidebar(QTreeWidget):
         super().keyPressEvent(event)
 
     def make_section(self, text, dim_color, clickable=False, path=None):
-        item = QTreeWidgetItem([text])
+        item = QTreeWidgetItem([text.upper()])
         if clickable:
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         else:
             item.setFlags(Qt.ItemIsEnabled)
         f = item.font(0)
         f.setBold(True)
+        f.setPointSize(max(f.pointSize() - 1, 7))
+        f.setLetterSpacing(QFont.AbsoluteSpacing, 1.0)
         item.setFont(0, f)
         item.setForeground(0, QColor(dim_color))
         if path is not None:
@@ -1316,10 +1319,9 @@ class FileManager(QMainWindow):
         self.path_edit.escapePressed.connect(self.on_path_escape)
         top.addWidget(self.path_edit, 1)
 
-        self.btn_pin = self._flat_btn("☆", self.toggle_pin_current)
+        self.btn_pin = self._flat_btn("Pin", self.toggle_pin_current)
         top.addWidget(self.btn_pin)
 
-        top.addWidget(QLabel("🔍"))
         self.filter_edit = _FilterEdit()
         self.filter_edit.setMaximumWidth(220)
         self.filter_edit.textChanged.connect(self.on_filter_change)
@@ -1347,6 +1349,7 @@ class FileManager(QMainWindow):
         self.view.setShowGrid(False)
         self.view.setSortingEnabled(False)
         self.view.verticalHeader().setVisible(False)
+        self.view.verticalHeader().setDefaultSectionSize(28)
         self.view.setWordWrap(False)
 
         # Right-click context menu for the file list.
@@ -1413,15 +1416,16 @@ class FileManager(QMainWindow):
                 background: transparent;
                 color: {P['fg']};
                 border: none;
-                border-radius: 4px;
-                padding: 2px 8px;
+                border-radius: 5px;
+                padding: 4px 10px;
             }}
             QToolButton:hover {{ background: {P['hover']}; }}
+            QToolButton:pressed {{ background: {P['sel_bg']}; }}
             QToolButton#NewTabButton {{
                 background: transparent;
                 color: {P['dim']};
                 border: none;
-                border-radius: 4px;
+                border-radius: 5px;
                 padding: 0 10px;
                 font-size: 15pt;
                 font-weight: bold;
@@ -1436,30 +1440,46 @@ class FileManager(QMainWindow):
                 color: {P['fg']};
                 selection-background-color: {P['sel_bg']};
                 selection-color: {P['sel_fg']};
-                gridline-color: {P['border']};
+                gridline-color: transparent;
                 border: 1px solid {P['border']};
+                border-radius: 6px;
+                alternate-background-color: {P['side']};
+                outline: none;
+            }}
+            QTableView::item {{
+                padding: 4px 10px;
+                border: none;
+            }}
+            QHeaderView {{
+                background: {P['head']};
             }}
             QHeaderView::section {{
                 background: {P['head']};
                 color: {P['dim']};
                 border: none;
                 border-bottom: 1px solid {P['border']};
-                padding: 6px 8px;
+                padding: 8px 10px;
+                font-weight: 600;
             }}
-            QHeaderView::section:hover {{ background: {P['hover']}; }}
+            QHeaderView::section:hover {{
+                background: {P['hover']};
+                color: {P['fg']};
+            }}
             QLineEdit {{
                 background: {P['entry']};
                 color: {P['fg']};
                 border: 1px solid {P['border']};
-                border-radius: 4px;
-                padding: 4px 8px;
+                border-radius: 6px;
+                padding: 6px 10px;
+                selection-background-color: {P['sel_bg']};
+                selection-color: {P['sel_fg']};
             }}
             QLineEdit:focus {{ border: 1px solid {P['accent']}; }}
             QLabel#StatusLabel {{
                 background: {P['side']};
                 color: {P['dim']};
                 padding: 6px 14px;
-                border-radius: 3px;
+                border-radius: 6px;
             }}
             QLabel#CaptureHint {{
                 color: {P['accent']};
@@ -1469,13 +1489,16 @@ class FileManager(QMainWindow):
                 background: {P['side']};
                 color: {P['fg']};
                 border: 1px solid {P['border']};
-                border-radius: 4px;
+                border-radius: 6px;
                 outline: none;
+                padding: 4px;
+                show-decoration-selected: 1;
             }}
             QTreeWidget#Sidebar::item {{
                 background-color: transparent;
-                padding: 5px 6px;
-                border-radius: 3px;
+                padding: 6px 8px;
+                border-radius: 4px;
+                margin: 1px 2px;
             }}
             QTreeWidget#Sidebar::item:hover {{
                 background-color: {P['hover']};
@@ -1499,10 +1522,10 @@ class FileManager(QMainWindow):
                 color: {P['dim']};
                 border: 1px solid {P['border']};
                 border-bottom: none;
-                padding: 5px 12px;
-                margin-right: 2px;
-                border-top-left-radius: 5px;
-                border-top-right-radius: 5px;
+                padding: 6px 14px;
+                margin-right: 3px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
                 min-width: 90px;
             }}
             QTabBar#TabStrip::tab:selected {{
@@ -1516,7 +1539,7 @@ class FileManager(QMainWindow):
             QTabBar#TabStrip::close-button {{
                 background: transparent;
                 border: none;
-                border-radius: 2px;
+                border-radius: 3px;
             }}
             QTabBar#TabStrip::close-button:hover {{
                 background: {P['danger']};
@@ -1525,30 +1548,44 @@ class FileManager(QMainWindow):
                 background: {P['bg']};
                 color: {P['fg']};
             }}
+            QMenuBar::item {{
+                background: transparent;
+                padding: 4px 10px;
+                border-radius: 4px;
+            }}
             QMenuBar::item:selected {{ background: {P['hover']}; }}
             QMenu {{
                 background: {P['menu_bg']};
                 color: {P['fg']};
                 border: 1px solid {P['border']};
+                border-radius: 6px;
+                padding: 4px;
             }}
             QMenu::item {{
                 padding: 6px 24px;
                 border-radius: 4px;
+                background: transparent;
             }}
             QMenu::item:selected {{
                 background: {P['menu_active']};
                 color: {P['fg']};
             }}
+            QMenu::item:disabled {{ color: {P['dim']}; }}
+            QMenu::separator {{
+                height: 1px;
+                background: {P['border']};
+                margin: 4px 8px;
+            }}
             QListWidget {{
                 background: {P['field']};
                 color: {P['fg']};
                 border: 1px solid {P['border']};
-                border-radius: 4px;
+                border-radius: 6px;
                 outline: none;
             }}
             QListWidget::item {{
-                padding: 4px 8px;
-                border-radius: 2px;
+                padding: 5px 8px;
+                border-radius: 4px;
             }}
             QListWidget::item:hover {{ background: {P['hover']}; }}
             QListWidget::item:selected {{
@@ -1556,6 +1593,16 @@ class FileManager(QMainWindow):
                 color: {P['sel_fg']};
             }}
             QCheckBox {{ color: {P['fg']}; }}
+            QPushButton {{
+                background: {P['tab']};
+                color: {P['fg']};
+                border: 1px solid {P['border']};
+                border-radius: 6px;
+                padding: 5px 14px;
+            }}
+            QPushButton:hover {{ background: {P['hover']}; }}
+            QPushButton:pressed {{ background: {P['sel_bg']}; }}
+            QDialog {{ background: {P['bg']}; color: {P['fg']}; }}
         """)
 
         if getattr(self, "sidebar", None) is not None:
@@ -3264,8 +3311,7 @@ class FileManager(QMainWindow):
             if any(same_loc(path, s) for s in seen):
                 continue
             name = os.path.basename(path.rstrip(os.sep)) or path
-            icon = self._icon_for(path, name)
-            sb.add_nav_item(header, f"{icon} {name}", path, tooltip=path)
+            sb.add_nav_item(header, name, path, tooltip=path)
             seen.append(path)
 
         for known_name, known_path in known_folders():
@@ -3273,10 +3319,8 @@ class FileManager(QMainWindow):
                 continue
             if any(same_loc(known_path, up) for up in self.cfg["unpinned"]):
                 continue
-            icon = QUICK_ICONS.get(known_name, "📁")
             tip = known_name if known_path in VIRTUAL else known_path
-            sb.add_nav_item(header, f"{icon} {known_name}", known_path,
-                            tooltip=tip)
+            sb.add_nav_item(header, known_name, known_path, tooltip=tip)
             seen.append(known_path)
 
         header.setExpanded(True)
@@ -3288,7 +3332,7 @@ class FileManager(QMainWindow):
 
         drives = scan_drives(quick=True)
         for drive in drives:
-            item = sb.add_nav_item(header, f"💾 {drive.name}", drive.path,
+            item = sb.add_nav_item(header, drive.name, drive.path,
                                    tooltip=drive.path)
             extra = self._drive_usage.get(drive.path)
             if extra:
@@ -3298,14 +3342,6 @@ class FileManager(QMainWindow):
                 QThreadPool.globalInstance().start(task)
 
         header.setExpanded(True)
-
-    def _icon_for(self, path, name):
-        if name in QUICK_ICONS:
-            return QUICK_ICONS[name]
-        for known_name, known_path in known_folders():
-            if same_loc(known_path, path):
-                return QUICK_ICONS.get(known_name, "📁")
-        return "📁"
 
     def _apply_usage_text(self, item, path, extra):
         m = _SIDEBAR_PCT_RE.search(extra)
@@ -3435,16 +3471,15 @@ class FileManager(QMainWindow):
 
     def _update_pin_button(self):
         P = self.palette
-        if not self.cwd or self.cwd in VIRTUAL:
-            text, color = "☆", P["dim"]
-        elif self.is_pinned(self.cwd):
-            text, color = "★", P["accent"]
+        if self.cwd and self.cwd not in VIRTUAL and self.is_pinned(self.cwd):
+            color, tip = P["accent"], "Unpin this folder"
         else:
-            text, color = "☆", P["dim"]
-        self.btn_pin.setText(text)
+            color, tip = P["dim"], "Pin this folder"
+        self.btn_pin.setText("Pin")
+        self.btn_pin.setToolTip(tip)
         self.btn_pin.setStyleSheet(
             f"QToolButton {{ color: {color}; background: transparent; "
-            f"border: none; padding: 2px 8px; }}"
+            f"border: none; padding: 4px 10px; font-weight: 600; }}"
         )
 
     # ----------------------------------------------------- status / flash
