@@ -1,8 +1,10 @@
 """keyfm UI - PySide6 port.
 
-Step 3 of the mandatory iteration protocol:
-    path/filter shortcuts (Ctrl+L / Ctrl+F / Ctrl+B), typeahead, and the
-    lasso (rubber-band selection) with faithful row-fraction edge auto-scroll.
+Step 3 (with follow-up fixes) of the mandatory iteration protocol:
+    path/filter shortcuts (Ctrl+L / Ctrl+F / Ctrl+B), typeahead, the lasso
+    (rubber-band selection) with faithful row-fraction edge auto-scroll,
+    consistent sidebar hover highlighting, and a threaded system-wide search
+    when the filter box is used inside THIS PC.
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -29,8 +31,10 @@ STEP 1 (done):
     status / flash, apply_theme (initial pass).
 STEP 2 (done): sidebar, QUICK ACCESS pins, THIS PC, drive usage threads,
                sidebar context menu, Delete-to-unpin, ★ button.
-STEP 3 (this file): path/filter shortcuts, typeahead, lasso (rubber-band
-                    selection) with row-fraction edge auto-scroll.
+STEP 3 (done): path/filter shortcuts, typeahead, lasso (rubber-band
+               selection) with row-fraction edge auto-scroll.
+STEP 3b (this file): sidebar hover fix + threaded system-wide search in
+               THIS PC (QThread, os.walk, streamed results).
 STEP 4 (next):      Tab model save/load, tab strip widget, Alt+N, close.
 STEP 5:             menus, ACTION_DEFS bindings, QShortcut, shortcuts dialog,
                     capture dialog, reset_all.
@@ -50,7 +54,8 @@ import traceback
 
 from PySide6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QObject, QRect, QRunnable,
-    QThreadPool, QTimer, QItemSelection, QItemSelectionModel, Signal,
+    QThread, QThreadPool, QTimer, QItemSelection, QItemSelectionModel,
+    Signal,
 )
 from PySide6.QtGui import (
     QColor, QPalette, QFont, QKeySequence, QShortcut,
@@ -85,6 +90,11 @@ COL_WIDTHS = {"name": 460, "where": 260, "size": 100, "modified": 160}
 
 # Column-name -> alignment. Only "size" is right-aligned.
 COL_ALIGN = {"size": Qt.AlignRight | Qt.AlignVCenter}
+
+# Search results carry the containing folder in Item.orig, so the "where"
+# column is meaningful (and visible) while a system-wide search is running.
+SEARCH_TITLES = {"name": "Name", "where": "Folder", "size": "Size",
+                 "modified": "Modified"}
 
 # Drive-usage "extra" text from scan_drives is shaped like
 #   "12.3 GB used of 100.0 GB (12.3%)"
@@ -197,6 +207,111 @@ class _FilterEdit(QLineEdit):
             self.downPressed.emit()
             return
         super().keyPressEvent(event)
+
+
+# ================================================= system-wide search
+class _SystemSearchThread(QThread):
+    """Walk every drive in a background thread, streaming matching items.
+
+    Emits ``batch(list[Item])`` roughly every ``BATCH`` hits and ``done()``
+    when the walk finishes (or is cancelled). ``truncated`` becomes True when
+    the walk stopped at ``MAX_RESULTS``.
+
+    Never touches widgets: results travel to the GUI thread through queued
+    signal connections, which is what keeps the window responsive while a
+    whole disk is being scanned.
+    """
+
+    batch = Signal(list)     # list of Item
+    done = Signal()
+
+    BATCH = 48
+    MAX_RESULTS = 4000
+    # Directories that are almost never what the user is looking for and
+    # that are expensive / permission-hostile to walk.
+    SKIP_DIRS = {"$recycle.bin", "system volume information", ".git",
+                 "node_modules", "__pycache__", ".svn", ".hg"}
+
+    def __init__(self, query, roots, show_hidden, parent=None):
+        super().__init__(parent)
+        self.query = query.lower()
+        self.roots = list(roots)
+        self.show_hidden = show_hidden
+        self.truncated = False
+        self._stop = False
+
+    def cancel(self):
+        """Ask the walk to stop. Safe to call from the GUI thread."""
+        self._stop = True
+
+    def _match(self, name):
+        if not self.show_hidden and name.startswith("."):
+            return False
+        return self.query in name.lower()
+
+    def run(self):
+        buf = []
+        total = 0
+        batch_size = self.BATCH
+        limit = self.MAX_RESULTS
+        try:
+            for root in self.roots:
+                if self._stop or total >= limit:
+                    break
+                for dirpath, dirnames, filenames in os.walk(root):
+                    if self._stop or total >= limit:
+                        break
+                    dirnames[:] = [d for d in dirnames
+                                   if d.lower() not in self.SKIP_DIRS]
+                    # Folders first, then files (matches the list ordering).
+                    for name in dirnames:
+                        if self._stop:
+                            break
+                        if not self._match(name):
+                            continue
+                        full = os.path.join(dirpath, name)
+                        try:
+                            mtime = os.stat(full,
+                                            follow_symlinks=False).st_mtime
+                        except OSError:
+                            mtime = 0
+                        buf.append(Item(name, full, True, 0, mtime,
+                                        name.startswith("."), orig=dirpath))
+                        total += 1
+                        if len(buf) >= batch_size:
+                            self.batch.emit(buf)
+                            buf = []
+                        if total >= limit:
+                            self.truncated = True
+                            break
+                    if total >= limit:
+                        self.truncated = True
+                        break
+                    for name in filenames:
+                        if self._stop:
+                            break
+                        if not self._match(name):
+                            continue
+                        full = os.path.join(dirpath, name)
+                        try:
+                            st = os.stat(full, follow_symlinks=False)
+                            size, mtime = st.st_size, st.st_mtime
+                        except OSError:
+                            size, mtime = 0, 0
+                        buf.append(Item(name, full, False, size, mtime,
+                                        name.startswith("."), orig=dirpath))
+                        total += 1
+                        if len(buf) >= batch_size:
+                            self.batch.emit(buf)
+                            buf = []
+                        if total >= limit:
+                            self.truncated = True
+                            break
+        except Exception:
+            traceback.print_exc()
+        if buf and not self._stop:
+            self.batch.emit(buf)
+        self.done.emit()
 
 
 # ===================================================== lasso + typeahead
@@ -548,6 +663,10 @@ class Sidebar(QTreeWidget):
         self.setAnimated(False)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setColumnCount(1)
+        # Mouse tracking must be on for both the view and its viewport so Qt
+        # reliably updates the hovered index (needed for ::item:hover).
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         # itemAt(pos) wants viewport-relative coordinates, so the policy
         # goes on the viewport, not on the tree widget itself.
         self.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
@@ -597,13 +716,20 @@ class Sidebar(QTreeWidget):
 
     # --------------------------------------------------------- helpers
     def make_section(self, text, dim_color, clickable=False, path=None):
-        """Add a bold section header. Non-clickable headers use NoItemFlags
-        so they can't be selected or focused."""
+        """Add a bold section header.
+
+        Non-clickable headers stay *enabled* (only ``ItemIsEnabled``, never
+        ``ItemIsSelectable``): Qt does not deliver hover state to the children
+        of a fully-disabled branch, so ``NoItemFlags`` here would kill the
+        hover highlight for every row underneath the header. They still cannot
+        be clicked into a navigation because they carry no path, and cannot be
+        selected because they lack ``ItemIsSelectable``.
+        """
         item = QTreeWidgetItem([text])
         if clickable:
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         else:
-            item.setFlags(Qt.NoItemFlags)
+            item.setFlags(Qt.ItemIsEnabled)
         f = item.font(0)
         f.setBold(True)
         item.setFont(0, f)
@@ -688,6 +814,14 @@ class FileManager(QMainWindow):
         # Populated by background workers, kept across sidebar rebuilds.
         self._drive_usage = {}
         self._usage_signals = None    # created below, after _build_ui
+
+        # ---- system-wide search state (THIS PC + non-empty filter) ----
+        self._search_active = False
+        self._search_thread = None
+        self._search_query = ""
+        self._search_results = []
+        self._search_truncated = False
+        self._retired = []            # cancelled threads still winding down
 
         # Flash timer (status-bar override), replaced by QTimer.
         self._flash_timer = QTimer(self)
@@ -904,14 +1038,15 @@ class FileManager(QMainWindow):
                 outline: none;
             }}
             QTreeWidget#Sidebar::item {{
+                background-color: transparent;
                 padding: 5px 6px;
                 border-radius: 3px;
             }}
             QTreeWidget#Sidebar::item:hover {{
-                background: {P['hover']};
+                background-color: {P['hover']};
             }}
             QTreeWidget#Sidebar::item:selected {{
-                background: {P['sel_bg']};
+                background-color: {P['sel_bg']};
                 color: {P['sel_fg']};
             }}
             QSplitter::handle {{
@@ -947,9 +1082,14 @@ class FileManager(QMainWindow):
 
     # ----------------------------------------------------------- headings
     def update_headings(self):
-        titles = (PC_TITLES if self.cwd == THIS_PC
-                  else BIN_TITLES if self.cwd == RECYCLE
-                  else TITLES)
+        if self._search_active:
+            titles = SEARCH_TITLES
+        elif self.cwd == THIS_PC:
+            titles = PC_TITLES
+        elif self.cwd == RECYCLE:
+            titles = BIN_TITLES
+        else:
+            titles = TITLES
         cols = tuple(c for c in COLS if titles.get(c) is not None)
         self.model.set_layout(cols, titles)
         self._apply_column_sizing()
@@ -1049,10 +1189,8 @@ class FileManager(QMainWindow):
 
         self.apply_filter_and_sort()
 
-    def apply_filter_and_sort(self):
-        flt = self.filter_edit.text().lower()
-        rows = [e for e in self.entries if flt in e.name.lower()]
-
+    def _sort_items(self, rows):
+        """Sort `rows` in place by the current column, folders first."""
         def sort_key(it):
             col = self.sort_col
             if col == "size":
@@ -1068,6 +1206,27 @@ class FileManager(QMainWindow):
             return (not it.is_dir, val)
 
         rows.sort(key=sort_key, reverse=self.sort_reverse)
+        return rows
+
+    def apply_filter_and_sort(self):
+        query = self.filter_edit.text().strip()
+
+        # --- search mode: THIS PC + a non-empty filter box ------------
+        if self.cwd == THIS_PC and query:
+            if self._search_active and self._search_query == query:
+                # Already walking; a sort click or a repaint just re-renders.
+                self._render_search()
+            else:
+                self._start_search(query)
+            return
+        if self._search_active:
+            # Filter was cleared (or we left THIS PC): back to normal.
+            self._cancel_search()
+            self.update_headings()
+
+        flt = query.lower()
+        rows = [e for e in self.entries if flt in e.name.lower()]
+        self._sort_items(rows)
         self.shown = rows
         self.model.set_rows(rows)
         self._update_sort_indicator()
@@ -1076,6 +1235,88 @@ class FileManager(QMainWindow):
             self.view.setCurrentIndex(self.model.index(0, 0))
             self.view.selectRow(0)
         self.update_status()
+
+    # ------------------------------------------------ system-wide search
+    def _start_search(self, query):
+        """Begin a fresh background walk for `query` across every drive."""
+        self._cancel_search()
+        self._search_active = True
+        self._search_query = query
+        self._search_results = []
+        self._search_truncated = False
+        self.shown = []
+        self.model.set_rows([])
+        self.update_headings()
+
+        roots = [it.path for it in self.entries if it.is_dir]
+        if not roots:
+            roots = [d.path for d in scan_drives(quick=True)]
+        if not roots:
+            self._search_active = False
+            self.update_status()
+            return
+
+        th = _SystemSearchThread(query, roots, self.show_hidden, self)
+        th.batch.connect(self._on_search_batch)
+        th.done.connect(self._on_search_done)
+        self._search_thread = th
+        self.update_status()
+        th.start()
+
+    def _cancel_search(self, wait=False):
+        """Stop the walker (if any) and leave search mode."""
+        th = self._search_thread
+        self._search_thread = None
+        self._search_active = False
+        self._search_query = ""
+        self._search_results = []
+        self._search_truncated = False
+        if th is None:
+            return
+        for sig, slot in ((th.batch, self._on_search_batch),
+                          (th.done, self._on_search_done)):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
+        th.cancel()
+        # Keep a reference until the thread really finishes; dropping the
+        # last reference to a running QThread aborts the process.
+        self._retired.append(th)
+        th.finished.connect(lambda t=th: self._reap_thread(t))
+        if wait:
+            th.wait(3000)
+
+    def _reap_thread(self, th):
+        if th in self._retired:
+            self._retired.remove(th)
+
+    def _on_search_batch(self, items):
+        if self.sender() is not self._search_thread:
+            return
+        self._search_results.extend(items)
+        self._render_search()
+
+    def _on_search_done(self):
+        if self.sender() is not self._search_thread:
+            return
+        self._search_truncated = bool(getattr(self._search_thread,
+                                              "truncated", False))
+        self._render_search()
+
+    def _render_search(self):
+        rows = self._sort_items(list(self._search_results))
+        self.shown = rows
+        self.model.set_rows(rows)
+        self._update_sort_indicator()
+        self.update_status()
+
+    def closeEvent(self, event):
+        # Never let the process die with a live QThread (Qt aborts on that).
+        self._cancel_search(wait=True)
+        for th in list(self._retired):
+            th.wait(3000)
+        super().closeEvent(event)
 
     # ---------------------------------------------------------- filtering
     def on_filter_change(self, *_):
@@ -1376,11 +1617,27 @@ class FileManager(QMainWindow):
         self._flash_timer.start(ms)
 
     def update_status(self):
-        total = len(self.shown)
         sel = 0
         sm = self.view.selectionModel()
         if sm is not None:
             sel = len(sm.selectedRows())
+
+        if self._search_active:
+            n = len(self._search_results)
+            running = (self._search_thread is not None
+                       and self._search_thread.isRunning())
+            if running:
+                text = f"Searching for “{self._search_query}”… {n} found"
+            else:
+                text = f"{n} results for “{self._search_query}”"
+                if self._search_truncated:
+                    text += " (stopped at limit)"
+            if sel > 0:
+                text += f" ({sel} selected)"
+            self.status.setText(text)
+            return
+
+        total = len(self.shown)
         text = f"{total} items"
         if sel > 0:
             text += f" ({sel} selected)"
