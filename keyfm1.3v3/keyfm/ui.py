@@ -1,10 +1,10 @@
 """keyfm UI - PySide6 port.
 
-Step 4 of the mandatory iteration protocol:
-    tabs - tab strip widget, Save / Load / Restore view per tab,
-    new tab (Ctrl+T), close tab (Ctrl+W), next/prev (Ctrl+Tab /
-    Ctrl+Shift+Tab / Ctrl+PgDn / Ctrl+PgUp), jump to Alt+1..9, and a
-    double-click on empty tab-strip space creates a new tab.
+Step 5 of the mandatory iteration protocol:
+    menus (File / Edit / View / Go / Tools) + unified QShortcut binding
+    system driven by keys.ACTION_DEFS, the shortcuts dialog
+    (show_shortcuts), the key capture dialog (capture_key), conflict
+    reassignment prompts, and reset_all.
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -35,11 +35,12 @@ STEP 3 (done): path/filter shortcuts, typeahead, lasso (rubber-band
                selection) with row-fraction edge auto-scroll.
 STEP 3b (done): sidebar hover fix + threaded system-wide search in
                THIS PC (QThread, os.walk, streamed results).
-STEP 4 (this file): tabs (Tab strip, save/load/restore, Ctrl+T, Ctrl+W,
+STEP 4 (done): tabs (Tab strip, save/load/restore, Ctrl+T, Ctrl+W,
                Ctrl+Tab family, Alt+1..9).
-STEP 5 (next): menus, ACTION_DEFS bindings, QShortcut, shortcuts dialog,
-               capture dialog, reset_all.
-STEP 6:        context menus, rename / new file / new folder /
+STEP 5 (this file): menus, ACTION_DEFS-driven QShortcut bindings,
+               shortcuts dialog (show_shortcuts), capture dialog
+               (capture_key), conflict reassignment, reset_all.
+STEP 6 (next): context menus, rename / new file / new folder /
                properties dialogs.
 STEP 7:        open-with dialog, cfg["assoc"] persistence, Windows
                chooser.
@@ -59,13 +60,13 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QColor, QPalette, QFont, QKeySequence, QShortcut,
+    QAction, QColor, QPalette, QFont, QKeySequence, QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableView, QLineEdit, QLabel, QAbstractItemView, QHeaderView,
     QToolButton, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu,
-    QRubberBand, QTabBar,
+    QRubberBand, QTabBar, QDialog, QPushButton, QMessageBox,
 )
 
 from .constants import (
@@ -77,13 +78,17 @@ from .models import Item, Tab
 from .config import load_config, save_config
 from .drives import scan_drives, known_folders
 from .trash import scan_trash
+from .keys import (
+    ACTION_DEFS, ACTION_INFO, ENTRY_PASS, FIXED_KEYS, RESERVED,
+    is_safe_key, norm_spec, split_key,
+)
 from .helpers import (
     human_size, fmt_time, same_loc, exists_loc,
     # NOTE: helpers.brk and helpers.set_clipboard are Tk-coupled and MUST
-    # NOT be imported (per task instructions). set_clipboard will be
-    # reimplemented locally when step 5/6 need the clipboard. brk does not
-    # apply to Qt.
+    # NOT be imported (per task instructions). Clipboard access goes
+    # through QApplication.clipboard() instead.
 )
+from .apps import default_open
 
 
 # Default widths (px) used by the file list.
@@ -101,6 +106,99 @@ SEARCH_TITLES = {"name": "Name", "where": "Folder", "size": "Size",
 #   "12.3 GB used of 100.0 GB (12.3%)"
 # so we can pull out the percentage cheaply when it arrives.
 _SIDEBAR_PCT_RE = re.compile(r"\(([\d.]+)%\)")
+
+# --- Qt <-> keyfm shortcut name translations --------------------------
+# keys.py canonically uses Tk-ish names ("PgDn", "Enter", "Esc",
+# "Delete", "Space"). QKeySequence wants Qt's portable names.
+_TO_QKEY = {
+    "PgDn": "PgDown",
+    "PgUp": "PgUp",
+    "Enter": "Return",
+    "Return": "Return",
+    "Esc": "Esc",
+    "Escape": "Esc",
+    "Delete": "Del",
+    "Del": "Del",
+    "Backspace": "Backspace",
+    "BackSpace": "Backspace",
+    "Menu": "Menu",
+    "Tab": "Tab",
+    "Space": "Space",
+    "Up": "Up",
+    "Down": "Down",
+    "Left": "Left",
+    "Right": "Right",
+    "Home": "Home",
+    "End": "End",
+    "Insert": "Ins",
+}
+
+# Reverse direction: Qt portable string -> keyfm canonical.
+_FROM_QKEY = {
+    "PgUp": "PgUp",
+    "PgDown": "PgDn",
+    "Return": "Enter",
+    "Enter": "Enter",
+    "Del": "Delete",
+    "Delete": "Delete",
+    "Backspace": "Backspace",
+    "Esc": "Esc",
+    "Escape": "Esc",
+    "Space": "Space",
+    "Tab": "Tab",
+    "Menu": "Menu",
+    "Home": "Home",
+    "End": "End",
+    "Up": "Up",
+    "Down": "Down",
+    "Left": "Left",
+    "Right": "Right",
+    "Ins": "Insert",
+    "Insert": "Insert",
+}
+
+
+def _to_qsequence(spec):
+    """Convert a keyfm shortcut spec to a QKeySequence (or None)."""
+    if not spec:
+        return None
+    mods, key = split_key(spec)
+    parts = [m for m in ("Ctrl", "Alt", "Shift") if m in mods]
+    qkey = _TO_QKEY.get(key, key)
+    parts.append(qkey)
+    try:
+        seq = QKeySequence("+".join(parts))
+    except Exception:
+        return None
+    if seq.isEmpty():
+        return None
+    return seq
+
+
+def _spec_from_qt(text):
+    """Convert a Qt portable shortcut string to a keyfm spec."""
+    if not text:
+        return ""
+    mods = set()
+    key = ""
+    for p in text.split("+"):
+        if p == "Ctrl":
+            mods.add("Ctrl")
+        elif p == "Alt":
+            mods.add("Alt")
+        elif p == "Shift":
+            mods.add("Shift")
+        elif p in ("Meta", "Super", "Win"):
+            return ""              # not supported by keyfm
+        else:
+            key = p
+    if not key:
+        return ""
+    if len(key) == 1 and key.isalpha():
+        key = key.upper()
+    key = _FROM_QKEY.get(key, key)
+    ordered = [m for m in ("Ctrl", "Alt", "Shift") if m in mods]
+    return "+".join(ordered + [key])
 
 
 class FileListModel(QAbstractTableModel):
@@ -210,18 +308,88 @@ class _FilterEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+# ============================================================ shortcuts
+class _KeyCaptureDialog(QDialog):
+    """Modal key press capture.
+
+    Opens with focus on itself and consumes the next non-modifier key.
+    Escape cancels the capture. The captured spec is stored in ``spec``
+    (None if the user cancelled).
+    """
+
+    _MOD_KEYS = (Qt.Key_Control, Qt.Key_Shift, Qt.Key_Alt, Qt.Key_Meta,
+                 Qt.Key_AltGr, Qt.Key_unknown)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.spec = None
+        self.setWindowTitle("Press a key")
+        self.setModal(True)
+        self.resize(460, 170)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 16, 16, 12)
+        v.setSpacing(8)
+        lbl = QLabel("<b>Press a key combination</b><br>"
+                     "Esc cancels. Ctrl/Alt/F-keys are safe; "
+                     "other single keys are rejected.")
+        lbl.setWordWrap(True)
+        v.addWidget(lbl)
+        self._hint = QLabel("")
+        self._hint.setMinimumHeight(20)
+        self._hint.setObjectName("CaptureHint")
+        v.addWidget(self._hint)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        v.addLayout(row)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus(Qt.OtherFocusReason)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.reject()
+            return
+        # Tab / Shift+Tab are captured explicitly so they don't move focus.
+        if event.key() in (Qt.Key_Tab, Qt.Key_Backtab):
+            mods = []
+            if event.modifiers() & Qt.ControlModifier:
+                mods.append("Ctrl")
+            if event.modifiers() & Qt.AltModifier:
+                mods.append("Alt")
+            if (event.modifiers() & Qt.ShiftModifier
+                    or event.key() == Qt.Key_Backtab):
+                mods.append("Shift")
+            mods.append("Tab")
+            self.spec = "+".join(mods)
+            self._hint.setText(f"<i>{self.spec}</i>")
+            self.accept()
+            return
+        if event.key() in self._MOD_KEYS:
+            return
+        text = ""
+        try:
+            kc = event.keyCombination()
+            text = QKeySequence(kc).toString(QKeySequence.PortableText)
+        except Exception:
+            text = ""
+        if not text:
+            return
+        spec = _spec_from_qt(text)
+        if not spec:
+            return
+        self.spec = spec
+        self._hint.setText(f"<i>{spec}</i>")
+        self.accept()
+
+
 # =============================================================== tab strip
 class TabStrip(QTabBar):
-    """The horizontal tab strip above the toolbar.
-
-    Emits:
-        * ``newTabRequested``            on double-click in empty space
-        * ``switched(index)``            on user-driven current change
-        * ``closeRequested(index)``      on the per-tab close button
-
-    Reordering is disabled in step 4 (would need a tabMoved -> self.tabs
-    sync); it can come back later without changing the rest of the design.
-    """
+    """The horizontal tab strip above the toolbar."""
 
     newTabRequested = Signal()
     switched = Signal(int)
@@ -253,24 +421,13 @@ class TabStrip(QTabBar):
 
 # ================================================= system-wide search
 class _SystemSearchThread(QThread):
-    """Walk every drive in a background thread, streaming matching items.
-
-    Emits ``batch(list[Item])`` roughly every ``BATCH`` hits and ``done()``
-    when the walk finishes (or is cancelled). ``truncated`` becomes True when
-    the walk stopped at ``MAX_RESULTS``.
-
-    Never touches widgets: results travel to the GUI thread through queued
-    signal connections, which is what keeps the window responsive while a
-    whole disk is being scanned.
-    """
+    """Walk every drive in a background thread, streaming matching items."""
 
     batch = Signal(list)     # list of Item
     done = Signal()
 
     BATCH = 48
     MAX_RESULTS = 4000
-    # Directories that are almost never what the user is looking for and
-    # that are expensive / permission-hostile to walk.
     SKIP_DIRS = {"$recycle.bin", "system volume information", ".git",
                  "node_modules", "__pycache__", ".svn", ".hg"}
 
@@ -283,7 +440,6 @@ class _SystemSearchThread(QThread):
         self._stop = False
 
     def cancel(self):
-        """Ask the walk to stop. Safe to call from the GUI thread."""
         self._stop = True
 
     def _match(self, name):
@@ -305,7 +461,6 @@ class _SystemSearchThread(QThread):
                         break
                     dirnames[:] = [d for d in dirnames
                                    if d.lower() not in self.SKIP_DIRS]
-                    # Folders first, then files (matches the list ordering).
                     for name in dirnames:
                         if self._stop:
                             break
@@ -358,60 +513,33 @@ class _SystemSearchThread(QThread):
 
 # ===================================================== lasso + typeahead
 class LassoTableView(QTableView):
-    """QTableView with rubber-band lasso selection and keyboard typeahead.
+    """QTableView with rubber-band lasso selection and keyboard typeahead."""
 
-    Lasso
-    -----
-    Press on empty space and drag: a rubber band follows the cursor. Every
-    row whose viewport rectangle intersects the band is selected. Ctrl held
-    at press time makes the lasso additive (existing selection is preserved).
-
-    Edge auto-scroll uses the "row-fraction" math: for a pointer `p` px
-    inside the EDGE_HOT band,
-
-        frac = p / row_height_px        (in *rows*, not pixels)
-        frac = min(frac, EDGE_MAX_FRAC) (clamp fast flings)
-
-    ``frac`` is the number of rows-per-tick to scroll; a sub-row accumulator
-    turns that into actual scrollbar moves so a shallow drag still moves the
-    view smoothly instead of jerking one row at a time.
-
-    Typeahead
-    ---------
-    Printable chars build a buffer that resets after TYPE_RESET_MS. The
-    effective query is the buffer, except when it is all one character, in
-    which case it is a single-char query that advances one hit per press.
-    """
-
-    DRAG_THRESHOLD = 4        # px before the rubber band appears
-    EDGE_HOT       = 22       # px from an edge that starts auto-scroll
-    EDGE_MAX_FRAC  = 3.0      # cap on rows scrolled per tick
-    EDGE_TICK_MS   = 28       # ~35 ticks/sec — smooth but not too fast
+    DRAG_THRESHOLD = 4
+    EDGE_HOT       = 22
+    EDGE_MAX_FRAC  = 3.0
+    EDGE_TICK_MS   = 28
     TYPE_RESET_MS  = 700
 
     def __init__(self, parent=None):
         super().__init__(parent)
-
-        # --- lasso state ---------------------------------------------
-        self._press_pt = None            # QPoint press origin (viewport)
+        self._press_pt = None
         self._press_idx_row = -1
         self._press_mods = Qt.NoModifier
         self._lassoing = False
         self._lasso_mods = Qt.NoModifier
-        self._base_selection = []        # rows selected when lasso began
+        self._base_selection = []
 
         self._rubber = QRubberBand(QRubberBand.Rectangle, self.viewport())
         self._rubber.hide()
 
-        # --- edge auto-scroll state ----------------------------------
         self._edge_timer = QTimer(self)
         self._edge_timer.setInterval(self.EDGE_TICK_MS)
         self._edge_timer.timeout.connect(self._edge_tick)
-        self._scroll_dir = 0             # -1 up, +1 down, 0 none
-        self._scroll_frac = 0.0          # rows per tick
+        self._scroll_dir = 0
+        self._scroll_frac = 0.0
         self._scroll_accum = 0.0
 
-        # --- typeahead state -----------------------------------------
         self._type_buf = ""
         self._type_timer = QTimer(self)
         self._type_timer.setSingleShot(True)
@@ -443,12 +571,10 @@ class LassoTableView(QTableView):
         pt = event.position().toPoint()
         idx = self.indexAt(pt)
         if idx.isValid():
-            # Row press -> normal Qt handling (click / modifier / drag-range).
             self._press_pt = None
             self._press_idx_row = -1
             super().mousePressEvent(event)
             return
-        # Empty-space press: begin potential lasso.
         self.setFocus(Qt.MouseFocusReason)
         self._press_pt = pt
         self._press_idx_row = -1
@@ -487,7 +613,6 @@ class LassoTableView(QTableView):
             event.accept()
             return
         if self._press_pt is not None:
-            # Plain empty-space click -> deselect (already cleared on press).
             self._press_pt = None
             event.accept()
             return
@@ -627,7 +752,6 @@ class LassoTableView(QTableView):
                 return True
         return True
 
-    # --------------------------------------------------- key handling
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape and self._lassoing:
             self._finish_lasso()
@@ -641,18 +765,10 @@ class LassoTableView(QTableView):
 
 # =============================================================== Sidebar
 class _SidebarUsageSignals(QObject):
-    """Carrier for the drive-usage worker -> UI signal (Qt-friendly)."""
-    ready = Signal(str, str)  # (drive_root, extra_text)
+    ready = Signal(str, str)
 
 
 class _DriveUsageTask(QRunnable):
-    """One-shot background task: compute ``shutil.disk_usage`` for one root.
-
-    Runs on ``QThreadPool.globalInstance()``; never touches widgets, only
-    emits a signal. If the signals owner is already gone (app is exiting)
-    we swallow the RuntimeError raised by PySide on a dead emitter.
-    """
-
     def __init__(self, path, signals):
         super().__init__()
         self.path = path
@@ -670,28 +786,16 @@ class _DriveUsageTask(QRunnable):
         try:
             self.signals.ready.emit(self.path, extra)
         except RuntimeError:
-            # Signals object was destroyed before the worker finished.
             pass
 
 
 class Sidebar(QTreeWidget):
-    """Left-hand nav: QUICK ACCESS (pins + known folders) and THIS PC.
-
-    The widget itself stays dumb: it emits:
-        * ``navigateTo(path)``         on click / Enter
-        * ``escapePressed``            on Escape
-        * ``unpinFromSidebar(path)``   on Delete
-        * ``contextMenuRequested(path, global_pos)``
-
-    and provides a handful of tiny helpers used by FileManager when it
-    rebuilds the tree. All state (``cfg["pins"]`` / ``cfg["unpinned"]``)
-    lives in FileManager; the sidebar never mutates it.
-    """
+    """Left-hand nav: QUICK ACCESS (pins + known folders) and THIS PC."""
 
     navigateTo = Signal(str)
     escapePressed = Signal()
     unpinFromSidebar = Signal(str)
-    contextMenuRequested = Signal(str, object)  # path, QPoint (global)
+    contextMenuRequested = Signal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -705,18 +809,13 @@ class Sidebar(QTreeWidget):
         self.setAnimated(False)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setColumnCount(1)
-        # Mouse tracking must be on for both the view and its viewport so Qt
-        # reliably updates the hovered index (needed for ::item:hover).
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
-        # itemAt(pos) wants viewport-relative coordinates, so the policy
-        # goes on the viewport, not on the tree widget itself.
         self.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
         self.viewport().customContextMenuRequested.connect(
             self._on_context_menu)
         self.itemClicked.connect(self._on_item_clicked)
 
-    # --------------------------------------------------------- events
     def _on_item_clicked(self, item, _col):
         if item is None:
             return
@@ -734,11 +833,9 @@ class Sidebar(QTreeWidget):
         self.contextMenuRequested.emit(path, self.viewport().mapToGlobal(pos))
 
     def keyPressEvent(self, event):
-        # Esc -> back to the file list.
         if event.key() == Qt.Key_Escape:
             self.escapePressed.emit()
             return
-        # Delete -> unpin the selected entry.
         if event.key() == Qt.Key_Delete:
             item = self.currentItem()
             if item is not None:
@@ -746,7 +843,6 @@ class Sidebar(QTreeWidget):
                 if path is not None:
                     self.unpinFromSidebar.emit(path)
                     return
-        # Enter -> navigate to the selected entry.
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             item = self.currentItem()
             if item is not None:
@@ -756,21 +852,12 @@ class Sidebar(QTreeWidget):
                     return
         super().keyPressEvent(event)
 
-    # --------------------------------------------------------- helpers
     def make_section(self, text, dim_color, clickable=False, path=None):
-        """Add a bold section header.
-
-        Non-clickable headers stay *enabled* (only ``ItemIsEnabled``, never
-        ``ItemIsSelectable``): Qt does not deliver hover state to the children
-        of a fully-disabled branch, so ``NoItemFlags`` here would kill the
-        hover highlight for every row underneath the header. They still cannot
-        be clicked into a navigation because they carry no path, and cannot be
-        selected because they lack ``ItemIsSelectable``.
-        """
         item = QTreeWidgetItem([text])
         if clickable:
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         else:
+            # Keep headers enabled so hover propagates to their children.
             item.setFlags(Qt.ItemIsEnabled)
         f = item.font(0)
         f.setBold(True)
@@ -790,13 +877,11 @@ class Sidebar(QTreeWidget):
         return item
 
     def apply_header_colors(self, dim_color):
-        """Re-colour section headers (called from apply_theme)."""
         for i in range(self.topLevelItemCount()):
             top = self.topLevelItem(i)
             top.setForeground(0, QColor(dim_color))
 
     def sync_selection(self, path):
-        """Highlight `path` if present; clear selection otherwise."""
         for i in range(self.topLevelItemCount()):
             top = self.topLevelItem(i)
             tpath = top.data(0, Qt.UserRole)
@@ -818,9 +903,6 @@ class Sidebar(QTreeWidget):
 class FileManager(QMainWindow):
     def __init__(self, root, start):
         # ---- Tk shim --------------------------------------------------
-        # __main__.py hands us a tk.Tk(); withdraw it and schedule its
-        # destruction for the first tick of Tk's own mainloop (which runs
-        # after this constructor returns, because we block on Qt's exec).
         try:
             if root is not None and hasattr(root, "after"):
                 root.withdraw()
@@ -842,8 +924,8 @@ class FileManager(QMainWindow):
         self.palette = DARK if self.dark else LIGHT
 
         self.cwd = None
-        self.entries = []          # unfiltered
-        self.shown = []            # filtered + sorted  (row == index here)
+        self.entries = []
+        self.shown = []
         self.back = []
         self.fwd = []
         self.sort_col = "name"
@@ -852,31 +934,30 @@ class FileManager(QMainWindow):
         self.clip_mode = "copy"
         self._suppress_filter = False
 
-        # Drive usage cache: path -> "X GB used of Y GB (Z%)".
-        # Populated by background workers, kept across sidebar rebuilds.
         self._drive_usage = {}
-        self._usage_signals = None    # created below, after _build_ui
+        self._usage_signals = None
 
-        # ---- system-wide search state (THIS PC + non-empty filter) ----
         self._search_active = False
         self._search_thread = None
         self._search_query = ""
         self._search_results = []
         self._search_truncated = False
-        self._retired = []            # cancelled threads still winding down
+        self._retired = []
 
-        # ---- tabs ----------------------------------------------------
         self.tabs = [Tab()]
         self.cur = 0
         self._switching_tab = False
-        self.tab_bar = None           # created by _build_ui
+        self.tab_bar = None
 
-        # Flash timer (status-bar override), replaced by QTimer.
+        # Menu actions keyed by action id (for shortcut-hint refresh).
+        self._menu_actions = {}
+        # Live QShortcut objects (rebuilt whenever cfg["keys"] changes).
+        self._shortcut_list = []
+
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self.update_status)
 
-        # Filter debounce timer (fix vs Tk: Tk re-sorted on every keystroke).
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
         self._filter_timer.setInterval(150)
@@ -890,28 +971,19 @@ class FileManager(QMainWindow):
         self._build_ui()
         self.apply_theme()
 
-        # ---- sidebar data (needs self.palette to be set) -------------
         self._usage_signals = _SidebarUsageSignals(self)
         self._usage_signals.ready.connect(self._on_usage_ready)
         self._populate_sidebar()
 
-        # Initial navigation. __main__.py already validated `start`, but
-        # be defensive here so unit-style imports never crash.
         home = os.path.expanduser("~")
         if not self.navigate(start, record=False):
             self.navigate(home, record=False)
 
-        # ---- block on Qt's event loop --------------------------------
-        # When the last window closes, exec() returns and so does __init__.
-        # __main__.py's `root.mainloop()` then runs, hits the scheduled
-        # root.destroy, and exits immediately.
         self.show()
         self.app.exec()
 
     # ------------------------------------------------------------- UI build
     def _flat_btn(self, text, cmd):
-        """Small flat toolbar button (QToolButton so the stylesheet can
-        give it a transparent background on hover)."""
         b = QToolButton()
         b.setText(text)
         b.setAutoRaise(True)
@@ -929,14 +1001,14 @@ class FileManager(QMainWindow):
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(6)
 
-        # --- tab strip --------------------------------------------------
+        # --- tab strip -------------------------------------------------
         self.tab_bar = TabStrip()
         self.tab_bar.newTabRequested.connect(self._on_new_tab_requested)
         self.tab_bar.switched.connect(self._on_tab_switched)
         self.tab_bar.closeRequested.connect(self._on_tab_close_requested)
         v.addWidget(self.tab_bar)
 
-        # --- toolbar row ------------------------------------------------
+        # --- toolbar row -----------------------------------------------
         top = QHBoxLayout()
         top.setSpacing(2)
         self.btn_back    = self._flat_btn("←", self.go_back)
@@ -965,7 +1037,7 @@ class FileManager(QMainWindow):
 
         v.addLayout(top)
 
-        # --- sidebar + file list (splitter) ----------------------------
+        # --- sidebar + file list ---------------------------------------
         self.sidebar = Sidebar()
         self.sidebar.setMinimumWidth(160)
         self.sidebar.setMaximumWidth(520)
@@ -981,7 +1053,7 @@ class FileManager(QMainWindow):
         self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.view.setShowGrid(False)
-        self.view.setSortingEnabled(False)      # we sort ourselves
+        self.view.setSortingEnabled(False)
         self.view.verticalHeader().setVisible(False)
         self.view.setWordWrap(False)
 
@@ -1009,30 +1081,17 @@ class FileManager(QMainWindow):
         self.status.setObjectName("StatusLabel")
         v.addWidget(self.status)
 
-        # --- path/filter/sidebar shortcuts -----------------------------
-        # Step 5 will replace these with ACTION_DEFS-driven QShortcuts; for
-        # now they are the only key bindings the app installs globally.
-        QShortcut(QKeySequence("Ctrl+L"), self, self.focus_path)
-        QShortcut(QKeySequence("Ctrl+F"), self, self.focus_filter)
-        QShortcut(QKeySequence("Ctrl+B"), self, self.toggle_sidebar_focus)
-
-        # --- tab shortcuts (defaults from keys.ACTION_DEFS) ------------
-        QShortcut(QKeySequence("Ctrl+T"), self, self.new_tab)
-        QShortcut(QKeySequence("Ctrl+W"), self, self.close_tab)
-        QShortcut(QKeySequence("Ctrl+Tab"), self, self.next_tab)
-        QShortcut(QKeySequence("Ctrl+Shift+Tab"), self, self.prev_tab)
-        QShortcut(QKeySequence("Ctrl+PgDown"), self, self.next_tab)
-        QShortcut(QKeySequence("Ctrl+PgUp"), self, self.prev_tab)
-        for _n in range(1, 10):
-            QShortcut(QKeySequence(f"Alt+{_n}"), self,
-                      lambda _idx=_n - 1: self.switch_tab(_idx))
+        # --- menus + unified shortcuts -------------------------------
+        # Menu bar is built first so the shortcut system can stamp the
+        # primary binding into each menu label.
+        self._build_menus()
+        self._bind_shortcuts()
 
         # Initial sync of the strip with the (single) empty tab.
         self._rebuild_tab_strip()
 
     # ----------------------------------------------------------- theme
     def apply_theme(self):
-        """Initial Qt palette + stylesheet. Final polish lands in step 8."""
         P = DARK if self.dark else LIGHT
         self.palette = P
 
@@ -1095,6 +1154,10 @@ class FileManager(QMainWindow):
                 padding: 6px 14px;
                 border-radius: 3px;
             }}
+            QLabel#CaptureHint {{
+                color: {P['accent']};
+                font-size: 14pt;
+            }}
             QTreeWidget#Sidebar {{
                 background: {P['side']};
                 color: {P['fg']};
@@ -1151,19 +1214,28 @@ class FileManager(QMainWindow):
             QTabBar#TabStrip::close-button:hover {{
                 background: {P['danger']};
             }}
+            QMenuBar {{
+                background: {P['bg']};
+                color: {P['fg']};
+            }}
+            QMenuBar::item:selected {{ background: {P['hover']}; }}
+            QMenu {{
+                background: {P['menu_bg']};
+                color: {P['fg']};
+                border: 1px solid {P['border']};
+            }}
+            QMenu::item:selected {{
+                background: {P['menu_active']};
+                color: {P['fg']};
+            }}
         """)
 
-        # Section headers were coloured explicitly (setForeground). On a
-        # theme switch we need to re-apply that colour with the new palette.
         if getattr(self, "sidebar", None) is not None:
             self.sidebar.apply_header_colors(P["dim"])
 
-        # ★ pin button reflects current location's pin state.
         self._update_pin_button()
 
     def toggle_dark(self):
-        # Step 1 port of the small dark/light toggle; the View menu binding
-        # arrives at step 5. Kept here so future steps reuse it verbatim.
         self.dark = not self.dark
         self.apply_theme()
         self.cfg["dark"] = self.dark
@@ -1175,6 +1247,482 @@ class FileManager(QMainWindow):
         self.cfg["show_hidden"] = self.show_hidden
         save_config(self.cfg)
         self.reload()
+
+    # -------------------------------------------------------- menu bar
+    def _build_menus(self):
+        mb = self.menuBar()
+        # Keep mnemonics consistent with keys.FIXED_KEYS (Alt+F/E/V/G/S).
+        try:
+            mb.setNativeMenuBar(False)
+        except Exception:
+            pass
+
+        def add(menu, aid, sep_before=False):
+            if sep_before:
+                menu.addSeparator()
+            info = ACTION_INFO.get(aid)
+            if info is None:
+                return
+            title = info[1]
+            specs = self._effective_keys(aid)
+            text = f"{title}\t{specs[0]}" if specs else title
+            act = QAction(text, self)
+            act.triggered.connect(
+                lambda _checked=False, aid=aid: self._run_action(aid))
+            menu.addAction(act)
+            self._menu_actions.setdefault(aid, []).append(act)
+
+        file_menu = mb.addMenu("&File")
+        add(file_menu, "new_tab")
+        add(file_menu, "close_tab")
+        add(file_menu, "open_with", sep_before=True)
+        add(file_menu, "properties")
+        add(file_menu, "quit", sep_before=True)
+
+        edit_menu = mb.addMenu("&Edit")
+        add(edit_menu, "copy")
+        add(edit_menu, "cut")
+        add(edit_menu, "paste")
+        add(edit_menu, "copy_path")
+        add(edit_menu, "rename", sep_before=True)
+        add(edit_menu, "delete")
+        add(edit_menu, "delete_perm")
+        add(edit_menu, "new_file", sep_before=True)
+        add(edit_menu, "new_folder")
+        add(edit_menu, "select_all", sep_before=True)
+
+        view_menu = mb.addMenu("&View")
+        add(view_menu, "dark")
+        add(view_menu, "hidden")
+        add(view_menu, "sort_name", sep_before=True)
+        add(view_menu, "sort_size")
+        add(view_menu, "sort_date")
+        add(view_menu, "refresh", sep_before=True)
+
+        go_menu = mb.addMenu("&Go")
+        add(go_menu, "back")
+        add(go_menu, "forward")
+        add(go_menu, "go_parent")
+        add(go_menu, "home", sep_before=True)
+        add(go_menu, "this_pc")
+        add(go_menu, "recycle")
+        add(go_menu, "edit_path", sep_before=True)
+        add(go_menu, "filter")
+        add(go_menu, "sidebar")
+
+        tools_menu = mb.addMenu("Tool&s")
+        add(tools_menu, "shortcuts")
+        tools_menu.addSeparator()
+        add(tools_menu, "pin")
+        add(tools_menu, "unpin")
+        tools_menu.addSeparator()
+        add(tools_menu, "empty_bin")
+        tools_menu.addSeparator()
+        reset_act = QAction("Reset all shortcuts", self)
+        reset_act.triggered.connect(self._menu_reset_all)
+        tools_menu.addAction(reset_act)
+
+        self._menus = {
+            "file": file_menu,
+            "edit": edit_menu,
+            "view": view_menu,
+            "go": go_menu,
+            "tools": tools_menu,
+        }
+
+    def _refresh_menu_shortcuts(self):
+        for aid, acts in self._menu_actions.items():
+            info = ACTION_INFO.get(aid)
+            if info is None:
+                continue
+            title = info[1]
+            specs = self._effective_keys(aid)
+            text = f"{title}\t{specs[0]}" if specs else title
+            for a in acts:
+                a.setText(text)
+
+    def _menu_reset_all(self):
+        if QMessageBox.question(
+                self, "Reset shortcuts",
+                "Restore all keyboard shortcuts to their defaults?",
+                QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+            self.reset_all()
+
+    # -------------------------------------------------- keybinding core
+    def _effective_keys(self, aid):
+        """Return the active shortcut list for ``aid`` (may be empty)."""
+        user = self.cfg.get("keys") or {}
+        saved = user.get(aid)
+        if isinstance(saved, list):
+            return [s for s in saved if isinstance(s, str)]
+        info = ACTION_INFO.get(aid)
+        if info is None:
+            return []
+        return list(info[3])
+
+    def _bind_shortcuts(self):
+        """Rebuild every QShortcut from cfg + ACTION_DEFS.
+
+        Scope decision per entry:
+          * Actions with ``scope == "all"`` (or ``id in ENTRY_PASS``)
+            whose spec has Ctrl/Alt or is an F-key fire from anywhere in
+            the window (Qt.WindowShortcut).
+          * Everything else is attached to the file list with
+            Qt.WidgetWithChildrenShortcut so pressing Enter / Delete /
+            Backspace inside the path or filter edit doesn't trigger it.
+        """
+        for sc in self._shortcut_list:
+            try:
+                sc.setEnabled(False)
+                sc.deleteLater()
+            except RuntimeError:
+                pass
+        self._shortcut_list = []
+        used = set()
+
+        for aid, title, category, defaults, scope in ACTION_DEFS:
+            for raw in self._effective_keys(aid):
+                spec = norm_spec(raw) if isinstance(raw, str) else ""
+                if not spec or spec in used:
+                    continue
+                seq = _to_qsequence(spec)
+                if seq is None:
+                    continue
+                if (scope == "all" or aid in ENTRY_PASS) and is_safe_key(spec):
+                    host, ctx = self, Qt.WindowShortcut
+                else:
+                    host, ctx = self.view, Qt.WidgetWithChildrenShortcut
+                try:
+                    sc = QShortcut(seq, host)
+                except Exception:
+                    continue
+                sc.setContext(ctx)
+                sc.activated.connect(
+                    lambda aid=aid: self._run_action(aid))
+                self._shortcut_list.append(sc)
+                used.add(spec)
+
+        # Alt+1..9 jump to tabs (reserved, not rebindable).
+        for n in range(1, 10):
+            seq = QKeySequence(f"Alt+{n}")
+            sc = QShortcut(seq, self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(lambda _idx=n - 1: self.switch_tab(_idx))
+            self._shortcut_list.append(sc)
+
+        self._refresh_menu_shortcuts()
+
+    def reset_all(self):
+        self.cfg["keys"] = {}
+        save_config(self.cfg)
+        self._bind_shortcuts()
+        self.flash("Keyboard shortcuts reset to defaults")
+
+    # ------------------------------------------------ action dispatcher
+    def _run_action(self, aid):
+        fn = getattr(self, "_act_" + aid, None)
+        if fn is None:
+            info = ACTION_INFO.get(aid)
+            title = info[1] if info else aid
+            self.flash(f"“{title}” arrives in a later step")
+            return
+        try:
+            fn()
+        except Exception:
+            traceback.print_exc()
+
+    # --- tabs
+    def _act_new_tab(self): self.new_tab()
+    def _act_close_tab(self): self.close_tab()
+    def _act_next_tab(self): self.next_tab()
+    def _act_prev_tab(self): self.prev_tab()
+
+    # --- navigation
+    def _act_open(self): self.open_current()
+    def _act_open_folder(self): self.open_current_folder()
+    def _act_go_parent(self): self.go_parent()
+    def _act_back(self): self.go_back()
+    def _act_forward(self): self.go_forward()
+    def _act_home(self): self.navigate(os.path.expanduser("~"))
+    def _act_this_pc(self): self.navigate(THIS_PC)
+    def _act_recycle(self): self.navigate(RECYCLE)
+    def _act_edit_path(self): self.focus_path()
+    def _act_filter(self): self.focus_filter()
+    def _act_sidebar(self): self.toggle_sidebar_focus()
+    def _act_first(self): self._focus_row(0)
+    def _act_last(self): self._focus_row(len(self.shown) - 1)
+    def _act_page_up(self):
+        cur = self.view.currentIndex().row()
+        if cur < 0: cur = 0
+        self._focus_row(cur - 15)
+    def _act_page_down(self):
+        cur = self.view.currentIndex().row()
+        if cur < 0: cur = 0
+        self._focus_row(cur + 15)
+
+    # --- files
+    def _act_select_all(self): self.view.selectAll()
+    def _act_copy_path(self): self.copy_path()
+
+    # --- view
+    def _act_sort_name(self): self.set_sort("name")
+    def _act_sort_size(self): self.set_sort("size")
+    def _act_sort_date(self): self.set_sort("modified")
+    def _act_hidden(self): self.toggle_hidden()
+    def _act_dark(self): self.toggle_dark()
+    def _act_refresh(self): self.reload()
+
+    # --- quick access
+    def _act_pin(self): self.toggle_pin_current()
+    def _act_unpin(self):
+        if self.cwd and self.cwd not in VIRTUAL:
+            self._unpin_and_flash(self.cwd)
+
+    # --- program
+    def _act_quit(self): self.close()
+    def _act_shortcuts(self): self.show_shortcuts()
+    def _act_menu_bar(self): self.open_menu_bar()
+
+    # --------------------------------------------------------- utilities
+    def _focus_row(self, row):
+        if not self.shown:
+            return
+        row = max(0, min(len(self.shown) - 1, row))
+        self.view.setFocus()
+        idx = self.model.index(row, 0)
+        self.view.selectionModel().setCurrentIndex(
+            idx,
+            QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
+        self.view.scrollTo(idx, QAbstractItemView.EnsureVisible)
+
+    def _current_item(self):
+        idx = self.view.currentIndex()
+        if idx.isValid() and 0 <= idx.row() < len(self.shown):
+            return self.shown[idx.row()]
+        return None
+
+    def open_current(self):
+        it = self._current_item()
+        if it is None:
+            return
+        if it.is_dir:
+            self.navigate(it.path)
+            return
+        try:
+            if default_open(it.path):
+                return
+        except Exception:
+            traceback.print_exc()
+        self.flash(f"Could not open “{it.name}”")
+
+    def open_current_folder(self):
+        it = self._current_item()
+        if it is not None and it.is_dir:
+            self.navigate(it.path)
+
+    def copy_path(self):
+        items = self._selected_items()
+        if not items:
+            it = self._current_item()
+            if it is not None:
+                items = [it]
+        if not items:
+            self.flash("Nothing selected")
+            return
+        text = "\n".join(it.path for it in items)
+        QApplication.clipboard().setText(text)
+        self.flash("Path copied")
+
+    def open_menu_bar(self):
+        mb = self.menuBar()
+        acts = mb.actions()
+        if acts:
+            mb.setActiveAction(acts[0])
+
+    # -------------------------------------------------- shortcut dialogs
+    def capture_key(self, parent=None):
+        """Show the modal key capture dialog; return a norm'd spec or None."""
+        dlg = _KeyCaptureDialog(parent or self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        if dlg.spec is None:
+            return None
+        return dlg.spec
+
+    def _change_shortcut(self, aid):
+        spec = self.capture_key(self)
+        if spec is None:
+            return
+        if not spec:
+            self.flash("No key captured")
+            return
+        spec = norm_spec(spec)
+        if not spec:
+            return
+        if spec in RESERVED:
+            QMessageBox.information(
+                self, "Reserved shortcut",
+                f"{spec} is a fixed shortcut and cannot be reassigned.")
+            return
+        if not is_safe_key(spec):
+            QMessageBox.information(
+                self, "Unsafe shortcut",
+                "That key would be typed away in text fields.\n"
+                "Use Ctrl+…, Alt+…, or an F-key.")
+            return
+
+        # Conflict check across other actions.
+        owner = None
+        for other in ACTION_INFO:
+            if other == aid:
+                continue
+            if spec in [norm_spec(s) for s in self._effective_keys(other)]:
+                owner = other
+                break
+        if owner is not None:
+            reply = QMessageBox.question(
+                self, "Shortcut in use",
+                f"{spec} is already bound to "
+                f"“{ACTION_INFO[owner][1]}”.\n"
+                f"Reassign it to “{ACTION_INFO[aid][1]}”?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+            keys = self.cfg.setdefault("keys", {})
+            keys[owner] = [s for s in self._effective_keys(owner)
+                           if norm_spec(s) != spec]
+
+        cur = [norm_spec(s) for s in self._effective_keys(aid)]
+        if spec in cur:
+            return
+        cur.append(spec)
+        self.cfg.setdefault("keys", {})[aid] = cur
+        save_config(self.cfg)
+        self._bind_shortcuts()
+
+    def show_shortcuts(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Keyboard shortcuts")
+        dlg.resize(720, 780)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(12, 12, 12, 12)
+        v.setSpacing(8)
+
+        hint = QLabel(
+            "Double-click an action to rebind it. "
+            "“Change…” captures the next key press (Esc cancels there). "
+            "“Clear” removes every binding from the action.")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        tree = QTreeWidget()
+        tree.setHeaderLabels(["Action / fixed key", "Key(s)"])
+        tree.setColumnWidth(0, 380)
+        tree.setAlternatingRowColors(True)
+        tree.setRootIsDecorated(True)
+        tree.setUniformRowHeights(True)
+        tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        v.addWidget(tree, 1)
+
+        row = QHBoxLayout()
+        btn_change = QPushButton("Change…")
+        btn_clear = QPushButton("Clear")
+        btn_reset = QPushButton("Reset all")
+        btn_close = QPushButton("Close")
+        row.addWidget(btn_change)
+        row.addWidget(btn_clear)
+        row.addWidget(btn_reset)
+        row.addStretch(1)
+        row.addWidget(btn_close)
+        v.addLayout(row)
+
+        def rebuild():
+            tree.clear()
+            cats = {}
+            order = []
+            for entry in ACTION_DEFS:
+                aid, title, cat = entry[0], entry[1], entry[2]
+                if cat not in cats:
+                    cats[cat] = []
+                    order.append(cat)
+                cats[cat].append((aid, title))
+            for cat in order:
+                top = QTreeWidgetItem([cat, ""])
+                f = top.font(0)
+                f.setBold(True)
+                top.setFont(0, f)
+                top.setFlags(Qt.ItemIsEnabled)
+                tree.addTopLevelItem(top)
+                for aid, title in cats[cat]:
+                    specs = self._effective_keys(aid)
+                    txt = "   ".join(specs) if specs else "(unassigned)"
+                    child = QTreeWidgetItem([title, txt])
+                    child.setData(0, Qt.UserRole, aid)
+                    top.addChild(child)
+                top.setExpanded(True)
+
+            top = QTreeWidgetItem(["Fixed keys (cannot be changed)", ""])
+            f = top.font(0)
+            f.setBold(True)
+            top.setFont(0, f)
+            top.setFlags(Qt.ItemIsEnabled)
+            tree.addTopLevelItem(top)
+            for k, desc in FIXED_KEYS:
+                child = QTreeWidgetItem([k, desc])
+                child.setFlags(Qt.ItemIsEnabled)
+                top.addChild(child)
+            top.setExpanded(True)
+
+        rebuild()
+
+        def current_aid():
+            it = tree.currentItem()
+            if it is None:
+                return None
+            return it.data(0, Qt.UserRole)
+
+        def change():
+            aid = current_aid()
+            if aid is None:
+                QMessageBox.information(
+                    dlg, "Keyboard shortcuts",
+                    "Select an action first.")
+                return
+            self._change_shortcut(aid)
+            rebuild()
+
+        def clear_binding():
+            aid = current_aid()
+            if aid is None:
+                return
+            self.cfg.setdefault("keys", {})[aid] = []
+            save_config(self.cfg)
+            self._bind_shortcuts()
+            rebuild()
+
+        def do_reset():
+            if QMessageBox.question(
+                    dlg, "Reset shortcuts",
+                    "Restore all shortcuts to their defaults?",
+                    QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                self.reset_all()
+                rebuild()
+
+        def on_double(item, _col):
+            if item is None:
+                return
+            aid = item.data(0, Qt.UserRole)
+            if aid is None:
+                return
+            self._change_shortcut(aid)
+            rebuild()
+
+        btn_change.clicked.connect(change)
+        btn_clear.clicked.connect(clear_binding)
+        btn_reset.clicked.connect(do_reset)
+        btn_close.clicked.connect(dlg.accept)
+        tree.itemDoubleClicked.connect(on_double)
+        dlg.exec()
 
     # ----------------------------------------------------------- headings
     def update_headings(self):
@@ -1194,7 +1742,8 @@ class FileManager(QMainWindow):
     def _apply_column_sizing(self):
         h = self.view.horizontalHeader()
         for i, col in enumerate(self.model.columns):
-            mode = QHeaderView.Stretch if col == "name" else QHeaderView.Interactive
+            mode = (QHeaderView.Stretch if col == "name"
+                    else QHeaderView.Interactive)
             h.setSectionResizeMode(i, mode)
             self.view.setColumnWidth(i, COL_WIDTHS.get(col, 100))
 
@@ -1203,7 +1752,8 @@ class FileManager(QMainWindow):
         cols = self.model.columns
         if self.sort_col in cols:
             idx = cols.index(self.sort_col)
-            order = Qt.DescendingOrder if self.sort_reverse else Qt.AscendingOrder
+            order = (Qt.DescendingOrder if self.sort_reverse
+                     else Qt.AscendingOrder)
             h.setSortIndicatorShown(True)
             h.setSortIndicator(idx, order)
         else:
@@ -1244,10 +1794,8 @@ class FileManager(QMainWindow):
         self.reload()
         self.path_edit.setText(self.display_path(target))
         self._update_pin_button()
-        # Keep the sidebar in sync so it reflects the current location.
         if getattr(self, "sidebar", None) is not None:
             self.sidebar.sync_selection(target)
-        # Persist the tab state now that cwd / sort etc. have settled.
         self.save_tab()
         return True
 
@@ -1287,7 +1835,6 @@ class FileManager(QMainWindow):
         self.apply_filter_and_sort()
 
     def _sort_items(self, rows):
-        """Sort `rows` in place by the current column, folders first."""
         def sort_key(it):
             col = self.sort_col
             if col == "size":
@@ -1298,8 +1845,6 @@ class FileManager(QMainWindow):
                 val = (it.orig or "").lower()
             else:
                 val = it.name.lower()
-            # Folders-first grouping: reverse=True moves files first, which
-            # matches the Tk behaviour (res.sort(..., reverse=...)).
             return (not it.is_dir, val)
 
         rows.sort(key=sort_key, reverse=self.sort_reverse)
@@ -1308,16 +1853,13 @@ class FileManager(QMainWindow):
     def apply_filter_and_sort(self):
         query = self.filter_edit.text().strip()
 
-        # --- search mode: THIS PC + a non-empty filter box ------------
         if self.cwd == THIS_PC and query:
             if self._search_active and self._search_query == query:
-                # Already walking; a sort click or a repaint just re-renders.
                 self._render_search()
             else:
                 self._start_search(query)
             return
         if self._search_active:
-            # Filter was cleared (or we left THIS PC): back to normal.
             self._cancel_search()
             self.update_headings()
 
@@ -1335,7 +1877,6 @@ class FileManager(QMainWindow):
 
     # ------------------------------------------------ system-wide search
     def _start_search(self, query):
-        """Begin a fresh background walk for `query` across every drive."""
         self._cancel_search()
         self._search_active = True
         self._search_query = query
@@ -1361,7 +1902,6 @@ class FileManager(QMainWindow):
         th.start()
 
     def _cancel_search(self, wait=False):
-        """Stop the walker (if any) and leave search mode."""
         th = self._search_thread
         self._search_thread = None
         self._search_active = False
@@ -1377,8 +1917,6 @@ class FileManager(QMainWindow):
             except (RuntimeError, TypeError):
                 pass
         th.cancel()
-        # Keep a reference until the thread really finishes; dropping the
-        # last reference to a running QThread aborts the process.
         self._retired.append(th)
         th.finished.connect(lambda t=th: self._reap_thread(t))
         if wait:
@@ -1409,7 +1947,6 @@ class FileManager(QMainWindow):
         self.update_status()
 
     def closeEvent(self, event):
-        # Never let the process die with a live QThread (Qt aborts on that).
         self._cancel_search(wait=True)
         for th in list(self._retired):
             th.wait(3000)
@@ -1449,8 +1986,6 @@ class FileManager(QMainWindow):
 
     def on_filter_escape(self):
         self.filter_edit.clear()
-        # Rebuild immediately; the debounced pass (also queued by clear())
-        # is a harmless no-op because set_rows dedupes identical row lists.
         self.apply_filter_and_sort()
         self.view.setFocus()
 
@@ -1458,7 +1993,6 @@ class FileManager(QMainWindow):
         self.view.setFocus()
 
     def toggle_sidebar_focus(self):
-        """Ctrl+B: jump to the sidebar, and back when already there."""
         if self.sidebar.hasFocus():
             self.view.setFocus()
             return
@@ -1499,13 +2033,6 @@ class FileManager(QMainWindow):
         return os.path.basename(t.cwd.rstrip(os.sep)) or t.cwd
 
     def _rebuild_tab_strip(self):
-        """Full sync of the QTabBar to self.tabs.
-
-        Rebuilds from scratch so removing a *middle* tab doesn't leave the
-        strip showing the wrong children. Cheap for the tab counts we care
-        about (<= a few dozen). Signals are blocked to avoid recursion with
-        the currentChanged handler.
-        """
         tb = self.tab_bar
         if tb is None:
             return
@@ -1534,7 +2061,6 @@ class FileManager(QMainWindow):
         tb.setTabToolTip(self.cur, t.cwd or "")
 
     def _sync_tab_bar_current(self):
-        """Fast path: only adjust currentIndex, no rebuild."""
         tb = self.tab_bar
         if tb is None:
             return
@@ -1562,7 +2088,6 @@ class FileManager(QMainWindow):
         return None
 
     def save_tab(self):
-        """Store the live view state into self.tabs[self.cur]."""
         if not self.tabs or not (0 <= self.cur < len(self.tabs)):
             return
         t = self.tabs[self.cur]
@@ -1577,7 +2102,6 @@ class FileManager(QMainWindow):
         self._update_current_tab_label()
 
     def load_tab(self, t):
-        """Restore the live view from a Tab object."""
         self._cancel_search()
         self._suppress_filter = True
         try:
@@ -1595,7 +2119,6 @@ class FileManager(QMainWindow):
         self.view.setFocus()
 
     def restore_view(self, sel, foc):
-        """Rebuild selection / current row by item name (paths move)."""
         sm = self.view.selectionModel()
         if sm is None:
             return
@@ -1692,7 +2215,6 @@ class FileManager(QMainWindow):
 
     # --------------------------------------------------------- sidebar
     def _populate_sidebar(self):
-        """Rebuild the sidebar tree from cfg + known folders + drives."""
         sb = self.sidebar
         sb.clear()
         self._add_quick_access()
@@ -1704,9 +2226,8 @@ class FileManager(QMainWindow):
         sb = self.sidebar
         header = sb.make_section("QUICK ACCESS", self.palette["dim"])
 
-        seen = []                       # list of paths already emitted
+        seen = []
 
-        # 1. User pins, in cfg order, deduped by same_loc.
         for path in self.cfg["pins"]:
             if path in VIRTUAL:
                 continue
@@ -1717,7 +2238,6 @@ class FileManager(QMainWindow):
             sb.add_nav_item(header, f"{icon} {name}", path, tooltip=path)
             seen.append(path)
 
-        # 2. Known folders that aren't already shown and aren't unpinned.
         for known_name, known_path in known_folders():
             if any(same_loc(known_path, s) for s in seen):
                 continue
@@ -1733,7 +2253,6 @@ class FileManager(QMainWindow):
 
     def _add_this_pc(self):
         sb = self.sidebar
-        # Clickable "THIS PC" header that navigates to the virtual drives view.
         header = sb.make_section("THIS PC", self.palette["dim"],
                                  clickable=True, path=THIS_PC)
 
@@ -1741,7 +2260,6 @@ class FileManager(QMainWindow):
         for drive in drives:
             item = sb.add_nav_item(header, f"💾 {drive.name}", drive.path,
                                    tooltip=drive.path)
-            # Re-apply cached usage if any, else spawn a worker.
             extra = self._drive_usage.get(drive.path)
             if extra:
                 self._apply_usage_text(item, drive.path, extra)
@@ -1752,7 +2270,6 @@ class FileManager(QMainWindow):
         header.setExpanded(True)
 
     def _icon_for(self, path, name):
-        """Best-effort icon: known folder name first, then by known path."""
         if name in QUICK_ICONS:
             return QUICK_ICONS[name]
         for known_name, known_path in known_folders():
@@ -1761,8 +2278,6 @@ class FileManager(QMainWindow):
         return "📁"
 
     def _apply_usage_text(self, item, path, extra):
-        """Append "  NN.N%" to a drive item and stash the full text in the
-        tooltip. Called both when a worker finishes and on sidebar rebuild."""
         m = _SIDEBAR_PCT_RE.search(extra)
         if not m:
             return
@@ -1775,9 +2290,7 @@ class FileManager(QMainWindow):
         item.setToolTip(0, f"{path}\n{extra}")
 
     def _on_usage_ready(self, path, extra):
-        """Slot for the background disk-usage worker."""
         self._drive_usage[path] = extra
-        # Find the drive item with this path and update it in place.
         for i in range(self.sidebar.topLevelItemCount()):
             top = self.sidebar.topLevelItem(i)
             for j in range(top.childCount()):
@@ -1787,9 +2300,7 @@ class FileManager(QMainWindow):
                     return
 
     def _on_sidebar_navigate(self, path):
-        # Sidebar click / Enter — mirror what the main list would do.
         if self.navigate(path) and self.view.hasFocus():
-            # only pull focus back when we're in "keyboard mode" already
             self.view.setFocus()
 
     def _on_sidebar_unpin(self, path):
@@ -1797,7 +2308,6 @@ class FileManager(QMainWindow):
             self.flash("This location cannot be unpinned")
             return
         if not self.is_pinned(path):
-            # The Delete key is a no-op for non-pinned entries.
             return
         self.unpin_folder(path)
         self.flash("Unpinned from Quick Access")
@@ -1834,14 +2344,12 @@ class FileManager(QMainWindow):
         return any(same_loc(kp, path) for _, kp in known_folders())
 
     def is_pinned(self, path):
-        """True when `path` is currently shown under Quick Access."""
         if not path or path in VIRTUAL:
             return False
         if any(same_loc(p, path) for p in self.cfg["pins"]):
             return True
         if any(same_loc(p, path) for p in self.cfg["unpinned"]):
             return False
-        # Default: all default known folders start out pinned.
         return any(same_loc(kp, path) for _, kp in known_folders())
 
     def pin_folder(self, path):
@@ -1850,7 +2358,6 @@ class FileManager(QMainWindow):
         if self.is_pinned(path):
             return
         if self._matches_known(path):
-            # Re-enable a default folder: just drop it from unpinned.
             self._remove_matching(self.cfg["unpinned"], path)
         elif not any(same_loc(p, path) for p in self.cfg["pins"]):
             self.cfg["pins"].append(path)
@@ -1886,11 +2393,11 @@ class FileManager(QMainWindow):
     def _update_pin_button(self):
         P = self.palette
         if not self.cwd or self.cwd in VIRTUAL:
-            text, color = "☆", P["dim"]         # not pinnable here
+            text, color = "☆", P["dim"]
         elif self.is_pinned(self.cwd):
-            text, color = "★", P["accent"]      # currently pinned
+            text, color = "★", P["accent"]
         else:
-            text, color = "☆", P["dim"]         # pinnable but not pinned
+            text, color = "☆", P["dim"]
         self.btn_pin.setText(text)
         self.btn_pin.setStyleSheet(
             f"QToolButton {{ color: {color}; background: transparent; "
@@ -1931,6 +2438,5 @@ class FileManager(QMainWindow):
 
 
 if __name__ == "__main__":
-    # Fallback for `python -m keyfm.ui`; __main__.py is the normal entry.
     start_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~")
     FileManager(None, start_dir)
