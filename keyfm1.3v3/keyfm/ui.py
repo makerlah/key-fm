@@ -54,7 +54,6 @@ STEP 7b (this file): Explorer-style context menu on the file list and
                "Show Windows Context Menu" via ctypes IContextMenu.
 STEP 8 (next): apply_theme polish, both LIGHT and DARK.
 """
-import ctypes
 import os
 import re
 import shutil
@@ -70,7 +69,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
-    QAction, QColor, QPalette, QFont, QKeySequence, QShortcut,
+    QAction, QColor, QCursor, QPalette, QFont, QKeySequence, QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -213,39 +212,6 @@ def _spec_from_qt(text):
     key = _FROM_QKEY.get(key, key)
     ordered = [m for m in ("Ctrl", "Alt", "Shift") if m in mods]
     return "+".join(ordered + [key])
-
-
-# ============================================ Windows shell menu ctypes
-# Constants (Win32 / SHLOBJ.H).
-_CMF_NORMAL = 0x00000000
-_CMF_EXPLORE = 0x00000004
-_CMF_CANRENAME = 0x00000010
-_CMF_EXTENDEDVERBS = 0x00000100
-_CMIC_MASK_UNICODE = 0x00004000
-_CMIC_MASK_PTINVOKE = 0x20000000
-
-
-class _GUID(ctypes.Structure):
-    """Win32 GUID layout (used for REFIID parameters)."""
-    _fields_ = [
-        ("Data1", ctypes.c_ulong),
-        ("Data2", ctypes.c_ushort),
-        ("Data3", ctypes.c_ushort),
-        ("Data4", ctypes.c_ubyte * 8),
-    ]
-
-
-def _make_guid(s):
-    """Build a _GUID from a textual GUID (e.g. '{...}')."""
-    import uuid
-    u = uuid.UUID(s.strip("{}"))
-    b = u.bytes
-    return _GUID(
-        Data1=int.from_bytes(b[0:4], "little"),
-        Data2=int.from_bytes(b[4:6], "little"),
-        Data3=int.from_bytes(b[6:8], "little"),
-        Data4=(ctypes.c_ubyte * 8)(*b[8:16]),
-    )
 
 
 class FileListModel(QAbstractTableModel):
@@ -880,6 +846,10 @@ class LassoTableView(QTableView):
         return [i.row() for i in sel.selectedRows(0)]
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            self._finish_lasso()
+            super().mousePressEvent(event)
+            return
         if event.button() != Qt.LeftButton:
             super().mousePressEvent(event)
             return
@@ -1560,6 +1530,10 @@ class FileManager(QMainWindow):
                 background: {P['menu_bg']};
                 color: {P['fg']};
                 border: 1px solid {P['border']};
+            }}
+            QMenu::item {{
+                padding: 6px 24px;
+                border-radius: 4px;
             }}
             QMenu::item:selected {{
                 background: {P['menu_active']};
@@ -3169,253 +3143,6 @@ class FileManager(QMainWindow):
         global_pos = self.view.viewport().mapToGlobal(vp_pos)
         self._on_list_context(self.view.mapFromGlobal(global_pos))
 
-    # ------------------------------------------ native Windows context menu
-    def show_native_menu(self, path):
-        """Invoke the real Windows shell context menu for `path`.
-
-        Shows all registered shell extensions (7-Zip, VLC, Git, “Send to”,
-        “Share”, …) exactly as Explorer would. Only works on Windows; the
-        ctypes IContextMenu code lives in `_native_context_menu_ctypes`.
-        """
-        if not IS_WIN:
-            self.flash("The native context menu is Windows only")
-            return
-        if not path or not os.path.lexists(path):
-            # The "empty area" case: use the current folder itself.
-            if self.cwd and self.cwd not in VIRTUAL \
-                    and os.path.isdir(self.cwd):
-                path = self.cwd
-            else:
-                self.flash("Cannot show the native menu here")
-                return
-        try:
-            self._native_context_menu_ctypes(path)
-        except Exception:
-            traceback.print_exc()
-            # Best-effort fallback: reveal the item in Explorer so the user
-            # can right-click there and use the native menu directly.
-            try:
-                subprocess.Popen(["explorer.exe", f"/select,{path}"])
-                self.flash("Native menu failed; opened in Explorer")
-            except Exception:
-                self.flash("Could not show the native context menu")
-
-    def _native_context_menu_ctypes(self, path):
-        """Full Win32 IContextMenu dance via ctypes.
-
-        Steps:
-          1. SHParseDisplayName  (path -> PIDL)
-          2. SHBindToParent      (PIDL -> IShellFolder + child PIDL)
-          3. IShellFolder::GetUIObjectOf(IID_IContextMenu)
-          4. CreatePopupMenu + IContextMenu::QueryContextMenu
-          5. TrackPopupMenuEx(TPM_RETURNCMD)
-          6. IContextMenu::InvokeCommand with MAKEINTRESOURCE(cmd - 1)
-        """
-        from ctypes import wintypes
-
-        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
-        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-
-        # ---- prototypes ---------------------------------------------
-        shell32.SHParseDisplayName.argtypes = [
-            wintypes.LPCWSTR,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_void_p),
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-        ]
-        shell32.SHParseDisplayName.restype = ctypes.c_long
-
-        shell32.SHBindToParent.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(_GUID),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        shell32.SHBindToParent.restype = ctypes.c_long
-
-        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
-        ole32.CoInitializeEx.restype = ctypes.c_long
-        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
-        ole32.CoTaskMemFree.restype = None
-
-        user32.CreatePopupMenu.argtypes = []
-        user32.CreatePopupMenu.restype = ctypes.c_void_p
-        user32.DestroyMenu.argtypes = [ctypes.c_void_p]
-        user32.DestroyMenu.restype = wintypes.BOOL
-        user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
-        user32.GetCursorPos.restype = wintypes.BOOL
-        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-        user32.SetForegroundWindow.restype = wintypes.BOOL
-        user32.TrackPopupMenuEx.argtypes = [
-            ctypes.c_void_p, wintypes.UINT, ctypes.c_int, ctypes.c_int,
-            wintypes.HWND, ctypes.c_void_p,
-        ]
-        user32.TrackPopupMenuEx.restype = wintypes.UINT
-        user32.PostMessageW.argtypes = [
-            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-        user32.PostMessageW.restype = wintypes.BOOL
-
-        # ---- 1. PIDL ------------------------------------------------
-        IID_IShellFolder = _make_guid("{000214E6-0000-0000-C000-000000000046}")
-        IID_IContextMenu = _make_guid("{000214E4-0000-0000-C000-000000000046}")
-
-        ole32.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED
-
-        pidl = ctypes.c_void_p()
-        attrs = wintypes.DWORD(0)
-        hr = shell32.SHParseDisplayName(
-            path, None, ctypes.byref(pidl), 0, ctypes.byref(attrs))
-        if hr != 0 or not pidl.value:
-            return
-        try:
-            # ---- 2. bind to parent ---------------------------------
-            psf = ctypes.c_void_p()
-            childlid = ctypes.c_void_p()
-            hr = shell32.SHBindToParent(
-                pidl, ctypes.byref(IID_IShellFolder),
-                ctypes.byref(psf), ctypes.byref(childlid))
-            if hr != 0 or not psf.value:
-                return
-            try:
-                # ---- 3. IShellFolder::GetUIObjectOf -----------------
-                apidl = (ctypes.c_void_p * 1)(childlid)
-                picm = ctypes.c_void_p()
-                psf_vt = ctypes.cast(
-                    psf,
-                    ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
-
-                GetUIObjectOf = ctypes.WINFUNCTYPE(
-                    ctypes.c_long,
-                    ctypes.c_void_p,       # this
-                    wintypes.HWND,         # hwndOwner
-                    ctypes.c_uint,         # cidl
-                    ctypes.POINTER(ctypes.c_void_p),  # apidl
-                    ctypes.POINTER(_GUID),            # riid
-                    ctypes.POINTER(ctypes.c_uint),    # rgfReserved
-                    ctypes.POINTER(ctypes.c_void_p),  # ppv
-                )(psf_vt[10])
-
-                hr = GetUIObjectOf(
-                    psf, None, 1, apidl,
-                    ctypes.byref(IID_IContextMenu),
-                    None, ctypes.byref(picm))
-                if hr != 0 or not picm.value:
-                    return
-                try:
-                    # ---- 4. CreatePopupMenu + QueryContextMenu -------
-                    hmenu = user32.CreatePopupMenu()
-                    if not hmenu:
-                        return
-                    try:
-                        picm_vt = ctypes.cast(
-                            picm,
-                            ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
-
-                        QueryContextMenu = ctypes.WINFUNCTYPE(
-                            ctypes.c_long,
-                            ctypes.c_void_p,   # this
-                            ctypes.c_void_p,   # hmenu
-                            ctypes.c_uint,     # indexMenu
-                            ctypes.c_uint,     # idCmdFirst
-                            ctypes.c_uint,     # idCmdLast
-                            ctypes.c_uint,     # uFlags
-                        )(picm_vt[3])
-
-                        CMF_FIRST = 1
-                        CMF_LAST = 0x7FFF
-                        flags = (_CMF_NORMAL | _CMF_EXPLORE
-                                 | _CMF_CANRENAME | _CMF_EXTENDEDVERBS)
-                        QueryContextMenu(
-                            picm, hmenu, 0, CMF_FIRST, CMF_LAST, flags)
-
-                        # ---- 5. TrackPopupMenuEx ---------------------
-                        pt = wintypes.POINT()
-                        user32.GetCursorPos(ctypes.byref(pt))
-                        hwnd = wintypes.HWND(int(self.winId()))
-                        try:
-                            user32.SetForegroundWindow(hwnd)
-                        except Exception:
-                            pass
-
-                        TPM_LEFTALIGN = 0x0000
-                        TPM_RIGHTBUTTON = 0x0002
-                        TPM_RETURNCMD = 0x0100
-
-                        cmd = user32.TrackPopupMenuEx(
-                            hmenu,
-                            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
-                            pt.x, pt.y, hwnd, None)
-
-                        # The classic WM_NULL trick ensures menu cleanup.
-                        try:
-                            user32.PostMessageW(hwnd, 0x0000, 0, 0)
-                        except Exception:
-                            pass
-
-                        # ---- 6. InvokeCommand ------------------------
-                        if cmd and cmd >= CMF_FIRST:
-                            class _CMICIEX(ctypes.Structure):
-                                _fields_ = [
-                                    ("cbSize", wintypes.DWORD),
-                                    ("fMask", wintypes.DWORD),
-                                    ("hwnd", wintypes.HWND),
-                                    ("lpVerb", ctypes.c_char_p),
-                                    ("lpParameters", ctypes.c_char_p),
-                                    ("lpDirectory", ctypes.c_char_p),
-                                    ("nShow", ctypes.c_int),
-                                    ("dwHotKey", wintypes.DWORD),
-                                    ("hIcon", wintypes.HANDLE),
-                                    ("lpTitle", ctypes.c_char_p),
-                                    ("lpVerbW", ctypes.c_wchar_p),
-                                    ("lpParametersW", ctypes.c_wchar_p),
-                                    ("lpDirectoryW", ctypes.c_wchar_p),
-                                    ("lpTitleW", ctypes.c_wchar_p),
-                                    ("ptInvoke", wintypes.POINT),
-                                ]
-
-                            info = _CMICIEX()
-                            info.cbSize = ctypes.sizeof(_CMICIEX)
-                            info.fMask = (_CMIC_MASK_UNICODE
-                                          | _CMIC_MASK_PTINVOKE)
-                            info.hwnd = hwnd
-                            verb_offset = cmd - CMF_FIRST
-                            info.lpVerb = ctypes.cast(
-                                verb_offset, ctypes.c_char_p)
-                            info.lpVerbW = ctypes.cast(
-                                verb_offset, ctypes.c_wchar_p)
-                            info.nShow = 1
-                            info.ptInvoke = pt
-
-                            InvokeCommand = ctypes.WINFUNCTYPE(
-                                ctypes.c_long,
-                                ctypes.c_void_p,
-                                ctypes.POINTER(_CMICIEX),
-                            )(picm_vt[4])
-                            InvokeCommand(picm, ctypes.byref(info))
-                    finally:
-                        try:
-                            user32.DestroyMenu(hmenu)
-                        except Exception:
-                            pass
-                finally:
-                    picm_vt = ctypes.cast(
-                        picm,
-                        ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
-                    Release = ctypes.WINFUNCTYPE(
-                        ctypes.c_ulong, ctypes.c_void_p)(picm_vt[2])
-                    Release(picm)
-            finally:
-                psf_vt = ctypes.cast(
-                    psf,
-                    ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
-                Release = ctypes.WINFUNCTYPE(
-                    ctypes.c_ulong, ctypes.c_void_p)(psf_vt[2])
-                Release(psf)
-        finally:
-            ole32.CoTaskMemFree(pidl)
-
     # ------------------------------------------------------------ menus
     def _menu_item(self, menu, aid, label=None):
         if label is None:
@@ -3440,10 +3167,7 @@ class FileManager(QMainWindow):
             return
 
         # --- normal right-click: resolve target, build menu ------------
-        try:
-            global_pos = self.view.mapToGlobal(pos)
-        except Exception:
-            global_pos = pos
+        global_pos = QCursor.pos()
         try:
             vp_pos = self.view.viewport().mapFromGlobal(global_pos)
             idx = self.view.indexAt(vp_pos)
@@ -3499,12 +3223,6 @@ class FileManager(QMainWindow):
             self._menu_item(menu, "rename")
             menu.addSeparator()
             self._menu_item(menu, "properties")
-            if IS_WIN:
-                menu.addSeparator()
-                target_path = items[0].path if items else self.cwd
-                menu.addAction(
-                    "Show Windows Context Menu",
-                    lambda p=target_path: self.show_native_menu(p))
         elif in_real:
             menu.addAction(term_label,
                            lambda: self.open_terminal(self.cwd))
@@ -3516,11 +3234,6 @@ class FileManager(QMainWindow):
             self._menu_item(menu, "new_folder")
             menu.addSeparator()
             self._menu_item(menu, "refresh")
-            if IS_WIN and self.cwd:
-                menu.addSeparator()
-                menu.addAction(
-                    "Show Windows Context Menu",
-                    lambda p=self.cwd: self.show_native_menu(p))
         elif in_bin:
             self._menu_item(menu, "empty_bin", "Empty Recycle Bin")
             self._menu_item(menu, "refresh")
@@ -3653,12 +3366,7 @@ class FileManager(QMainWindow):
             else:
                 menu.addAction("Pin to Quick Access",
                                lambda: self._pin_and_flash(path))
-            if IS_WIN:
-                menu.addSeparator()
-                menu.addAction(
-                    "Show Windows Context Menu",
-                    lambda p=path: self.show_native_menu(p))
-        menu.exec(global_pos)
+        menu.exec(QCursor.pos())
 
     def _pin_and_flash(self, path):
         self.pin_folder(path)
