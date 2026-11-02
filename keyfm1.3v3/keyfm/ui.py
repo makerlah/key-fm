@@ -1,11 +1,12 @@
 """keyfm UI - PySide6 port.
 
-Step 7 of the mandatory iteration protocol:
-    Open-with dialog (async app list loader thread, live filter, "Always
-    use this app" persistence, "Forget saved app", "Browse…" via
-    QFileDialog, and the Windows chooser via os.startfile(path, "openas"))
-    plus cfg["assoc"] read/write wired into both the explicit Open-with
-    action and the Enter-key open path.
+Step 7 (with follow-up Explorer-style context menu work):
+    - Shift + Right-Click → open a terminal at the current folder.
+    - Expanded file-list right-click menu (Cut / Copy / Paste / Create
+      shortcut / Delete / Rename / Properties / Open PowerShell here /
+      Open with… / Show Windows Context Menu).
+    - Native Windows shell context menu via ctypes IContextMenu (so 7-Zip,
+      VLC, Git extensions, etc. appear in their real form).
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -45,15 +46,20 @@ STEP 6 (done): "+" button on the tab strip; list context menu;
                copy / cut / paste / rename / delete / delete_perm /
                new file / new folder / properties / restore /
                empty bin implemented as real operations + PySide6 dialogs.
-STEP 7 (this file): Open-with dialog, cfg["assoc"] persistence, Windows
+STEP 7 (done): Open-with dialog, cfg["assoc"] persistence, Windows
                chooser, async app loading in a QThread, Browse via
                QFileDialog.
+STEP 7b (this file): Explorer-style context menu on the file list and
+               sidebar; Shift+Right-Click → terminal; "Create shortcut";
+               "Show Windows Context Menu" via ctypes IContextMenu.
 STEP 8 (next): apply_theme polish, both LIGHT and DARK.
 """
+import ctypes
 import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import time
 import traceback
@@ -207,6 +213,39 @@ def _spec_from_qt(text):
     key = _FROM_QKEY.get(key, key)
     ordered = [m for m in ("Ctrl", "Alt", "Shift") if m in mods]
     return "+".join(ordered + [key])
+
+
+# ============================================ Windows shell menu ctypes
+# Constants (Win32 / SHLOBJ.H).
+_CMF_NORMAL = 0x00000000
+_CMF_EXPLORE = 0x00000004
+_CMF_CANRENAME = 0x00000010
+_CMF_EXTENDEDVERBS = 0x00000100
+_CMIC_MASK_UNICODE = 0x00004000
+_CMIC_MASK_PTINVOKE = 0x20000000
+
+
+class _GUID(ctypes.Structure):
+    """Win32 GUID layout (used for REFIID parameters)."""
+    _fields_ = [
+        ("Data1", ctypes.c_ulong),
+        ("Data2", ctypes.c_ushort),
+        ("Data3", ctypes.c_ushort),
+        ("Data4", ctypes.c_ubyte * 8),
+    ]
+
+
+def _make_guid(s):
+    """Build a _GUID from a textual GUID (e.g. '{...}')."""
+    import uuid
+    u = uuid.UUID(s.strip("{}"))
+    b = u.bytes
+    return _GUID(
+        Data1=int.from_bytes(b[0:4], "little"),
+        Data2=int.from_bytes(b[4:6], "little"),
+        Data3=int.from_bytes(b[6:8], "little"),
+        Data4=(ctypes.c_ubyte * 8)(*b[8:16]),
+    )
 
 
 class FileListModel(QAbstractTableModel):
@@ -393,8 +432,6 @@ class TabStrip(QTabBar):
         self.setElideMode(Qt.ElideRight)
         self.setUsesScrollButtons(True)
         self.setFocusPolicy(Qt.NoFocus)
-        # Keep the strip sized to its tabs so a "+" button placed after it
-        # sits right at the end of the last tab.
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.currentChanged.connect(self.switched)
         self.tabCloseRequested.connect(self.closeRequested)
@@ -410,20 +447,13 @@ class TabStrip(QTabBar):
 
 
 # ================================================= open-with (step 7)
-# Live references to app-loader threads so Python cannot GC them out from
-# under a running Qt thread (which would abort the process).
 _APP_LOADERS = set()
 
 
 class _AppLoaderThread(QThread):
-    """Discover installed apps in the background.
+    """Discover installed apps in the background."""
 
-    ``list_apps()`` can take 1-3 s on Windows (PowerShell WScript.Shell
-    enumeration) which would freeze the modal dialog. We run it once here
-    and stream the final list back on the GUI thread.
-    """
-
-    done = Signal(list)          # list[dict] of {"name": str, "argv": list}
+    done = Signal(list)
     failed = Signal(str)
 
     def run(self):
@@ -443,13 +473,7 @@ class _AppLoaderThread(QThread):
 
 
 class OpenWithDialog(QDialog):
-    """Open-with chooser mirroring the Tkinter dialog.
-
-    Caller inspects ``chosen`` (app dict or None), ``always`` (bool), and
-    ``forget`` (bool) after ``exec()`` returns ``QDialog.Accepted``.
-    Persistence to ``cfg["assoc"]`` happens in :class:`FileManager`, so this
-    widget has no side effects on disk.
-    """
+    """Open-with chooser mirroring the Tkinter dialog."""
 
     def __init__(self, path, name, ext, saved_assoc, parent=None):
         super().__init__(parent)
@@ -457,7 +481,7 @@ class OpenWithDialog(QDialog):
         self.name = name
         self.ext = ext
         self.saved_assoc = dict(saved_assoc) if saved_assoc else None
-        self.chosen = None            # {"name": ..., "argv": [...]}
+        self.chosen = None
         self.always = False
         self.forget = False
         self._apps = []
@@ -467,7 +491,6 @@ class OpenWithDialog(QDialog):
         self.resize(560, 560)
         self._build()
 
-    # ---------------------------------------------------------- UI build
     def _build(self):
         v = QVBoxLayout(self)
         v.setContentsMargins(14, 14, 14, 12)
@@ -491,8 +514,6 @@ class OpenWithDialog(QDialog):
         self.always_cb = QCheckBox(
             f"Always use this app for {self.ext or 'files without extension'}")
         if not self.ext:
-            # Windows/macOS use the ext for the association key; without one
-            # we can't safely persist. Keep the checkbox but disable it.
             self.always_cb.setEnabled(False)
             self.always_cb.setToolTip("Files without an extension cannot be "
                                       "remembered.")
@@ -528,10 +549,8 @@ class OpenWithDialog(QDialog):
         btns.rejected.connect(self.reject)
         v.addWidget(btns)
 
-        # Start the async load only after the widgets exist.
         self._start_loading()
 
-    # -------------------------------------------------------- async load
     def _start_loading(self):
         self.list.clear()
         placeholder = QListWidgetItem("Loading applications…")
@@ -563,7 +582,6 @@ class OpenWithDialog(QDialog):
         placeholder.setFlags(Qt.NoItemFlags)
         self.list.addItem(placeholder)
 
-    # ------------------------------------------------------------ populate
     def _populate(self):
         flt = self.filter.text().strip().lower()
         self.list.blockSignals(True)
@@ -576,7 +594,6 @@ class OpenWithDialog(QDialog):
                 item = QListWidgetItem(name)
                 item.setData(Qt.UserRole, app)
                 self.list.addItem(item)
-            # Pre-select saved app or (if none) the first item.
             target = None
             if self.saved_assoc:
                 for i in range(self.list.count()):
@@ -603,13 +620,9 @@ class OpenWithDialog(QDialog):
         b_argv = b.get("argv") or []
         if not a_argv or not b_argv:
             return False
-        # Match on the executable path only — the {file} placeholder and
-        # any other trailing args can differ without meaning it's a
-        # different program.
         return os.path.normcase(str(a_argv[0])) == \
             os.path.normcase(str(b_argv[0]))
 
-    # --------------------------------------------------------- operations
     def _do_open(self):
         item = self.list.currentItem()
         if item is None:
@@ -656,8 +669,6 @@ class OpenWithDialog(QDialog):
         name = os.path.basename(fn)
         app = {"name": name, "argv": [fn, "{file}"]}
 
-        # Cache into the in-memory list so it can be re-filtered, and
-        # clear the filter so it becomes visible.
         already = any(self._same_app(a, app) for a in self._apps)
         if not already:
             self._apps.append(app)
@@ -698,10 +709,8 @@ class OpenWithDialog(QDialog):
                 self, "Windows chooser",
                 f"Could not open the Windows “Open with” dialog:\n{err}")
             return
-        # Windows takes over from here; nothing to persist locally.
         self.reject()
 
-    # ------------------------------------------------------------ dispose
     def _shutdown_thread(self):
         th = self._thread
         self._thread = None
@@ -715,9 +724,6 @@ class OpenWithDialog(QDialog):
             th.failed.disconnect(self._on_apps_failed)
         except (RuntimeError, TypeError):
             pass
-        # The thread keeps itself alive via _APP_LOADERS until it finishes,
-        # so we do NOT wait here — a slow app scan must not block the
-        # dialog close.
 
     def closeEvent(self, event):
         self._shutdown_thread()
@@ -1922,6 +1928,60 @@ class FileManager(QMainWindow):
         if it is not None and it.is_dir:
             self.navigate(it.path)
 
+    def open_terminal(self, path=None):
+        """Spawn a terminal emulator at `path` (defaults to self.cwd)."""
+        if path is None:
+            path = self.cwd
+        if not path or path in VIRTUAL:
+            self.flash("Cannot open a terminal here")
+            return
+        if IS_WIN:
+            try:
+                subprocess.Popen(
+                    ["powershell.exe", "-NoExit", "-Command",
+                     f"cd '{path}'"],
+                    creationflags=getattr(
+                        subprocess, "CREATE_NEW_CONSOLE", 0))
+                return
+            except OSError as err:
+                self.flash(f"Could not open PowerShell: {err}")
+                return
+        if sys.platform == "darwin":
+            for app in ("Terminal", "iTerm"):
+                try:
+                    subprocess.Popen(
+                        ["open", "-a", app, path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+                    return
+                except Exception:
+                    continue
+        # Linux / other: try common terminals in order.
+        candidates = [
+            ["gnome-terminal", "--working-directory", path],
+            ["konsole", "--workdir", path],
+            ["xfce4-terminal", "--working-directory", path],
+            ["tilix", "--working-directory", path],
+            ["terminator", "--working-directory", path],
+            ["alacritty", "--working-directory", path],
+            ["kitty", "--directory", path],
+            ["xterm", "-e", f"cd '{path}' && exec $SHELL"],
+        ]
+        for cmd in candidates:
+            try:
+                subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True)
+                return
+            except FileNotFoundError:
+                continue
+            except Exception:
+                continue
+        self.flash("No terminal found")
+
     def do_open_with(self):
         """Open-with dialog for the current (or selected single) file."""
         items = self._selected_items()
@@ -2814,6 +2874,77 @@ class FileManager(QMainWindow):
         else:
             self.flash(f"Moved {len(items)} item(s) to Recycle Bin")
 
+    def do_create_shortcut(self):
+        """Create a .lnk (Windows) or symlink (POSIX) to the current item."""
+        items = self._selected_items()
+        if not items:
+            it = self._current_item()
+            if it is not None:
+                items = [it]
+        if not items:
+            self.flash("Nothing selected")
+            return
+        if len(items) > 1:
+            self.flash("Select one item to shorten")
+            return
+        it = items[0]
+        if self.cwd in VIRTUAL or not os.path.isdir(self.cwd):
+            self.flash("Cannot create a shortcut here")
+            return
+
+        # Name collisions: "<base> - Shortcut<ext>", regenerate with (N).
+        if it.is_dir:
+            stem, ext = it.name, ".lnk" if IS_WIN else ""
+        else:
+            if IS_WIN:
+                stem = os.path.splitext(it.name)[0]
+                ext = ".lnk"
+            else:
+                stem, ext = it.name, ".lnk"
+        base = f"{stem} - Shortcut"
+        candidate = f"{base}{ext}"
+        n = 1
+        while os.path.lexists(os.path.join(self.cwd, candidate)):
+            candidate = f"{base} ({n}){ext}"
+            n += 1
+        dest = os.path.join(self.cwd, candidate)
+
+        if IS_WIN:
+            try:
+                ps_src = it.path.replace("'", "''")
+                ps_dst = dest.replace("'", "''")
+                script = (
+                    "$ws = New-Object -ComObject WScript.Shell; "
+                    f"$sc = $ws.CreateShortcut('{ps_dst}'); "
+                    f"$sc.TargetPath = '{ps_src}'; "
+                    "if (Test-Path -LiteralPath '" + ps_src +
+                    "' -PathType Container) { $sc.WindowStyle = 1 }; "
+                    "$sc.Save()"
+                )
+                cp = subprocess.run(
+                    ["powershell.exe", "-NoProfile", "-NonInteractive",
+                     "-Command", script],
+                    capture_output=True, timeout=15,
+                    creationflags=getattr(
+                        subprocess, "CREATE_NO_WINDOW", 0))
+                if cp.returncode != 0:
+                    err = (cp.stderr or b"").decode("utf-8", "replace")
+                    self.flash(f"Shortcut creation failed: {err.strip() or cp.returncode}")
+                    return
+            except Exception as err:
+                self.flash(f"Could not create shortcut: {err}")
+                return
+        else:
+            try:
+                os.symlink(it.path, dest)
+            except OSError as err:
+                self.flash(f"Could not create shortcut: {err}")
+                return
+
+        self.reload()
+        self._select_by_name(candidate)
+        self.flash(f"Created {candidate}")
+
     def do_new_file(self):
         if not self.cwd or self.cwd in VIRTUAL or not os.path.isdir(self.cwd):
             self.flash("Cannot create files here")
@@ -3038,6 +3169,253 @@ class FileManager(QMainWindow):
         global_pos = self.view.viewport().mapToGlobal(vp_pos)
         self._on_list_context(self.view.mapFromGlobal(global_pos))
 
+    # ------------------------------------------ native Windows context menu
+    def show_native_menu(self, path):
+        """Invoke the real Windows shell context menu for `path`.
+
+        Shows all registered shell extensions (7-Zip, VLC, Git, “Send to”,
+        “Share”, …) exactly as Explorer would. Only works on Windows; the
+        ctypes IContextMenu code lives in `_native_context_menu_ctypes`.
+        """
+        if not IS_WIN:
+            self.flash("The native context menu is Windows only")
+            return
+        if not path or not os.path.lexists(path):
+            # The "empty area" case: use the current folder itself.
+            if self.cwd and self.cwd not in VIRTUAL \
+                    and os.path.isdir(self.cwd):
+                path = self.cwd
+            else:
+                self.flash("Cannot show the native menu here")
+                return
+        try:
+            self._native_context_menu_ctypes(path)
+        except Exception:
+            traceback.print_exc()
+            # Best-effort fallback: reveal the item in Explorer so the user
+            # can right-click there and use the native menu directly.
+            try:
+                subprocess.Popen(["explorer.exe", f"/select,{path}"])
+                self.flash("Native menu failed; opened in Explorer")
+            except Exception:
+                self.flash("Could not show the native context menu")
+
+    def _native_context_menu_ctypes(self, path):
+        """Full Win32 IContextMenu dance via ctypes.
+
+        Steps:
+          1. SHParseDisplayName  (path -> PIDL)
+          2. SHBindToParent      (PIDL -> IShellFolder + child PIDL)
+          3. IShellFolder::GetUIObjectOf(IID_IContextMenu)
+          4. CreatePopupMenu + IContextMenu::QueryContextMenu
+          5. TrackPopupMenuEx(TPM_RETURNCMD)
+          6. IContextMenu::InvokeCommand with MAKEINTRESOURCE(cmd - 1)
+        """
+        from ctypes import wintypes
+
+        ole32 = ctypes.WinDLL("ole32", use_last_error=True)
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        # ---- prototypes ---------------------------------------------
+        shell32.SHParseDisplayName.argtypes = [
+            wintypes.LPCWSTR,
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        shell32.SHParseDisplayName.restype = ctypes.c_long
+
+        shell32.SHBindToParent.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_GUID),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+        shell32.SHBindToParent.restype = ctypes.c_long
+
+        ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+        ole32.CoInitializeEx.restype = ctypes.c_long
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree.restype = None
+
+        user32.CreatePopupMenu.argtypes = []
+        user32.CreatePopupMenu.restype = ctypes.c_void_p
+        user32.DestroyMenu.argtypes = [ctypes.c_void_p]
+        user32.DestroyMenu.restype = wintypes.BOOL
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.TrackPopupMenuEx.argtypes = [
+            ctypes.c_void_p, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, ctypes.c_void_p,
+        ]
+        user32.TrackPopupMenuEx.restype = wintypes.UINT
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+
+        # ---- 1. PIDL ------------------------------------------------
+        IID_IShellFolder = _make_guid("{000214E6-0000-0000-C000-000000000046}")
+        IID_IContextMenu = _make_guid("{000214E4-0000-0000-C000-000000000046}")
+
+        ole32.CoInitializeEx(None, 2)  # COINIT_APARTMENTTHREADED
+
+        pidl = ctypes.c_void_p()
+        attrs = wintypes.DWORD(0)
+        hr = shell32.SHParseDisplayName(
+            path, None, ctypes.byref(pidl), 0, ctypes.byref(attrs))
+        if hr != 0 or not pidl.value:
+            return
+        try:
+            # ---- 2. bind to parent ---------------------------------
+            psf = ctypes.c_void_p()
+            childlid = ctypes.c_void_p()
+            hr = shell32.SHBindToParent(
+                pidl, ctypes.byref(IID_IShellFolder),
+                ctypes.byref(psf), ctypes.byref(childlid))
+            if hr != 0 or not psf.value:
+                return
+            try:
+                # ---- 3. IShellFolder::GetUIObjectOf -----------------
+                apidl = (ctypes.c_void_p * 1)(childlid)
+                picm = ctypes.c_void_p()
+                psf_vt = ctypes.cast(
+                    psf,
+                    ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+
+                GetUIObjectOf = ctypes.WINFUNCTYPE(
+                    ctypes.c_long,
+                    ctypes.c_void_p,       # this
+                    wintypes.HWND,         # hwndOwner
+                    ctypes.c_uint,         # cidl
+                    ctypes.POINTER(ctypes.c_void_p),  # apidl
+                    ctypes.POINTER(_GUID),            # riid
+                    ctypes.POINTER(ctypes.c_uint),    # rgfReserved
+                    ctypes.POINTER(ctypes.c_void_p),  # ppv
+                )(psf_vt[10])
+
+                hr = GetUIObjectOf(
+                    psf, None, 1, apidl,
+                    ctypes.byref(IID_IContextMenu),
+                    None, ctypes.byref(picm))
+                if hr != 0 or not picm.value:
+                    return
+                try:
+                    # ---- 4. CreatePopupMenu + QueryContextMenu -------
+                    hmenu = user32.CreatePopupMenu()
+                    if not hmenu:
+                        return
+                    try:
+                        picm_vt = ctypes.cast(
+                            picm,
+                            ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+
+                        QueryContextMenu = ctypes.WINFUNCTYPE(
+                            ctypes.c_long,
+                            ctypes.c_void_p,   # this
+                            ctypes.c_void_p,   # hmenu
+                            ctypes.c_uint,     # indexMenu
+                            ctypes.c_uint,     # idCmdFirst
+                            ctypes.c_uint,     # idCmdLast
+                            ctypes.c_uint,     # uFlags
+                        )(picm_vt[3])
+
+                        CMF_FIRST = 1
+                        CMF_LAST = 0x7FFF
+                        flags = (_CMF_NORMAL | _CMF_EXPLORE
+                                 | _CMF_CANRENAME | _CMF_EXTENDEDVERBS)
+                        QueryContextMenu(
+                            picm, hmenu, 0, CMF_FIRST, CMF_LAST, flags)
+
+                        # ---- 5. TrackPopupMenuEx ---------------------
+                        pt = wintypes.POINT()
+                        user32.GetCursorPos(ctypes.byref(pt))
+                        hwnd = wintypes.HWND(int(self.winId()))
+                        try:
+                            user32.SetForegroundWindow(hwnd)
+                        except Exception:
+                            pass
+
+                        TPM_LEFTALIGN = 0x0000
+                        TPM_RIGHTBUTTON = 0x0002
+                        TPM_RETURNCMD = 0x0100
+
+                        cmd = user32.TrackPopupMenuEx(
+                            hmenu,
+                            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                            pt.x, pt.y, hwnd, None)
+
+                        # The classic WM_NULL trick ensures menu cleanup.
+                        try:
+                            user32.PostMessageW(hwnd, 0x0000, 0, 0)
+                        except Exception:
+                            pass
+
+                        # ---- 6. InvokeCommand ------------------------
+                        if cmd and cmd >= CMF_FIRST:
+                            class _CMICIEX(ctypes.Structure):
+                                _fields_ = [
+                                    ("cbSize", wintypes.DWORD),
+                                    ("fMask", wintypes.DWORD),
+                                    ("hwnd", wintypes.HWND),
+                                    ("lpVerb", ctypes.c_char_p),
+                                    ("lpParameters", ctypes.c_char_p),
+                                    ("lpDirectory", ctypes.c_char_p),
+                                    ("nShow", ctypes.c_int),
+                                    ("dwHotKey", wintypes.DWORD),
+                                    ("hIcon", wintypes.HANDLE),
+                                    ("lpTitle", ctypes.c_char_p),
+                                    ("lpVerbW", ctypes.c_wchar_p),
+                                    ("lpParametersW", ctypes.c_wchar_p),
+                                    ("lpDirectoryW", ctypes.c_wchar_p),
+                                    ("lpTitleW", ctypes.c_wchar_p),
+                                    ("ptInvoke", wintypes.POINT),
+                                ]
+
+                            info = _CMICIEX()
+                            info.cbSize = ctypes.sizeof(_CMICIEX)
+                            info.fMask = (_CMIC_MASK_UNICODE
+                                          | _CMIC_MASK_PTINVOKE)
+                            info.hwnd = hwnd
+                            verb_offset = cmd - CMF_FIRST
+                            info.lpVerb = ctypes.cast(
+                                verb_offset, ctypes.c_char_p)
+                            info.lpVerbW = ctypes.cast(
+                                verb_offset, ctypes.c_wchar_p)
+                            info.nShow = 1
+                            info.ptInvoke = pt
+
+                            InvokeCommand = ctypes.WINFUNCTYPE(
+                                ctypes.c_long,
+                                ctypes.c_void_p,
+                                ctypes.POINTER(_CMICIEX),
+                            )(picm_vt[4])
+                            InvokeCommand(picm, ctypes.byref(info))
+                    finally:
+                        try:
+                            user32.DestroyMenu(hmenu)
+                        except Exception:
+                            pass
+                finally:
+                    picm_vt = ctypes.cast(
+                        picm,
+                        ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+                    Release = ctypes.WINFUNCTYPE(
+                        ctypes.c_ulong, ctypes.c_void_p)(picm_vt[2])
+                    Release(picm)
+            finally:
+                psf_vt = ctypes.cast(
+                    psf,
+                    ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+                Release = ctypes.WINFUNCTYPE(
+                    ctypes.c_ulong, ctypes.c_void_p)(psf_vt[2])
+                Release(psf)
+        finally:
+            ole32.CoTaskMemFree(pidl)
+
     # ------------------------------------------------------------ menus
     def _menu_item(self, menu, aid, label=None):
         if label is None:
@@ -3053,6 +3431,15 @@ class FileManager(QMainWindow):
         return act
 
     def _on_list_context(self, pos):
+        # --- Shift + Right-Click -> terminal at the current folder -----
+        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+            if self.cwd and self.cwd not in VIRTUAL:
+                self.open_terminal(self.cwd)
+            else:
+                self.flash("Cannot open a terminal here")
+            return
+
+        # --- normal right-click: resolve target, build menu ------------
         try:
             global_pos = self.view.mapToGlobal(pos)
         except Exception:
@@ -3078,6 +3465,9 @@ class FileManager(QMainWindow):
         in_real = bool(self.cwd) and self.cwd not in VIRTUAL
         menu = QMenu(self.view)
 
+        term_label = ("Open PowerShell here" if IS_WIN
+                      else "Open Terminal here")
+
         if items and in_bin:
             self._menu_item(menu, "restore", "Restore")
             self._menu_item(menu, "delete_perm", "Delete permanently")
@@ -3094,27 +3484,43 @@ class FileManager(QMainWindow):
             self._menu_item(menu, "open")
             self._menu_item(menu, "open_with")
             menu.addSeparator()
+            # Terminal at the current folder (Shift+RC does the same fast).
+            menu.addAction(term_label,
+                           lambda: self.open_terminal(self.cwd))
+            menu.addSeparator()
             self._menu_item(menu, "cut")
             self._menu_item(menu, "copy")
             if self.clip:
                 self._menu_item(menu, "paste")
+            act_shortcut = menu.addAction(
+                "Create shortcut", self.do_create_shortcut)
             menu.addSeparator()
-            self._menu_item(menu, "rename")
             self._menu_item(menu, "delete")
-            self._menu_item(menu, "delete_perm")
-            menu.addSeparator()
-            self._menu_item(menu, "new_file")
-            self._menu_item(menu, "new_folder")
+            self._menu_item(menu, "rename")
             menu.addSeparator()
             self._menu_item(menu, "properties")
-        elif in_real:
-            if self.clip:
-                self._menu_item(menu, "paste")
+            if IS_WIN:
                 menu.addSeparator()
+                target_path = items[0].path if items else self.cwd
+                menu.addAction(
+                    "Show Windows Context Menu",
+                    lambda p=target_path: self.show_native_menu(p))
+        elif in_real:
+            menu.addAction(term_label,
+                           lambda: self.open_terminal(self.cwd))
+            if self.clip:
+                menu.addSeparator()
+                self._menu_item(menu, "paste")
+            menu.addSeparator()
             self._menu_item(menu, "new_file")
             self._menu_item(menu, "new_folder")
             menu.addSeparator()
             self._menu_item(menu, "refresh")
+            if IS_WIN and self.cwd:
+                menu.addSeparator()
+                menu.addAction(
+                    "Show Windows Context Menu",
+                    lambda p=self.cwd: self.show_native_menu(p))
         elif in_bin:
             self._menu_item(menu, "empty_bin", "Empty Recycle Bin")
             self._menu_item(menu, "refresh")
@@ -3224,9 +3630,22 @@ class FileManager(QMainWindow):
         self.flash("Unpinned from Quick Access")
 
     def _on_sidebar_context(self, path, global_pos):
+        # Shift + Right-Click -> terminal at the highlighted folder.
+        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+            if path and path not in VIRTUAL:
+                self.open_terminal(path)
+            else:
+                self.flash("Cannot open a terminal here")
+            return
+
         menu = QMenu(self)
         menu.addAction("Open", lambda: self.navigate(path))
         if path not in VIRTUAL:
+            term_label = ("Open PowerShell here" if IS_WIN
+                          else "Open Terminal here")
+            menu.addSeparator()
+            menu.addAction(term_label,
+                           lambda p=path: self.open_terminal(p))
             menu.addSeparator()
             if self.is_pinned(path):
                 menu.addAction("Unpin from Quick Access",
@@ -3234,6 +3653,11 @@ class FileManager(QMainWindow):
             else:
                 menu.addAction("Pin to Quick Access",
                                lambda: self._pin_and_flash(path))
+            if IS_WIN:
+                menu.addSeparator()
+                menu.addAction(
+                    "Show Windows Context Menu",
+                    lambda p=path: self.show_native_menu(p))
         menu.exec(global_pos)
 
     def _pin_and_flash(self, path):
