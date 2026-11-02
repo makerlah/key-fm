@@ -1,7 +1,8 @@
 """keyfm UI - PySide6 port.
 
-Step 1 of the mandatory iteration protocol:
-    window skeleton + QTableView + model + navigate / reload / sort / filter.
+Step 2 of the mandatory iteration protocol:
+    sidebar (Quick Access, pins, THIS PC, drives, drive usage threads,
+             context menu, Delete-to-unpin, ★ toggle).
 
 Also the QApplication-vs-Tk shim: ``__main__.py`` (frozen) does
 
@@ -22,13 +23,13 @@ never patched in place.
 
 Iteration status
 ----------------
-STEP 1 (this file):
+STEP 1 (done):
     window, QTableView over ``self.shown``, FileListModel, navigate,
     reload, sort (header click), filter (150 ms debounce), path entry,
     status / flash, apply_theme (initial pass).
-STEP 2 (next):      sidebar, QUICK ACCESS pins, THIS PC, drive usage threads,
+STEP 2 (this file): sidebar, QUICK ACCESS pins, THIS PC, drive usage threads,
                     sidebar context menu, Delete-to-unpin, ★ button.
-STEP 3:             lasso geometry port, typeahead, filter/path shortcuts.
+STEP 3 (next):      lasso geometry port, typeahead, filter/path shortcuts.
 STEP 4:             Tab model save/load, tab strip widget, Alt+N, close.
 STEP 5:             menus, ACTION_DEFS bindings, QShortcut, shortcuts dialog,
                     capture dialog, reset_all.
@@ -39,29 +40,32 @@ STEP 7:             open-with dialog, cfg["assoc"] persistence, Windows
 STEP 8:             apply_theme polish, both LIGHT and DARK.
 """
 import os
+import re
+import shutil
 import stat
 import sys
 import time
 import traceback
 
 from PySide6.QtCore import (
-    Qt, QAbstractTableModel, QModelIndex, QTimer, Signal,
+    Qt, QAbstractTableModel, QModelIndex, QObject, QRunnable,
+    QThreadPool, QTimer, Signal,
 )
 from PySide6.QtGui import QColor, QPalette, QFont
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableView, QLineEdit, QLabel, QAbstractItemView, QHeaderView,
-    QToolButton,
+    QToolButton, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu,
 )
 
 from .constants import (
     APP, IS_WIN, THIS_PC, RECYCLE, VIRTUAL, COLS,
-    TITLES, PC_TITLES, BIN_TITLES,
+    TITLES, PC_TITLES, BIN_TITLES, QUICK_ICONS,
 )
 from .theme import LIGHT, DARK
 from .models import Item, Tab
 from .config import load_config, save_config
-from .drives import scan_drives
+from .drives import scan_drives, known_folders
 from .trash import scan_trash
 from .helpers import (
     human_size, fmt_time, same_loc, exists_loc,
@@ -77,6 +81,11 @@ COL_WIDTHS = {"name": 460, "where": 260, "size": 100, "modified": 160}
 
 # Column-name -> alignment. Only "size" is right-aligned.
 COL_ALIGN = {"size": Qt.AlignRight | Qt.AlignVCenter}
+
+# Drive-usage "extra" text from scan_drives is shaped like
+#   "12.3 GB used of 100.0 GB (12.3%)"
+# so we can pull out the percentage cheaply when it arrives.
+_SIDEBAR_PCT_RE = re.compile(r"\(([\d.]+)%\)")
 
 
 class FileListModel(QAbstractTableModel):
@@ -186,6 +195,165 @@ class _FilterEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+# =============================================================== Sidebar
+class _SidebarUsageSignals(QObject):
+    """Carrier for the drive-usage worker -> UI signal (Qt-friendly)."""
+    ready = Signal(str, str)  # (drive_root, extra_text)
+
+
+class _DriveUsageTask(QRunnable):
+    """One-shot background task: compute ``shutil.disk_usage`` for one root.
+
+    Runs on ``QThreadPool.globalInstance()``; never touches widgets, only
+    emits a signal. If the signals owner is already gone (app is exiting)
+    we swallow the RuntimeError raised by PySide on a dead emitter.
+    """
+
+    def __init__(self, path, signals):
+        super().__init__()
+        self.path = path
+        self.signals = signals
+
+    def run(self):
+        try:
+            total, _used, free = shutil.disk_usage(self.path)
+        except OSError:
+            return
+        used = total - free
+        percent = (used / total * 100) if total else 0
+        extra = (f"{human_size(used)} used of {human_size(total)} "
+                 f"({percent:.1f}%)")
+        try:
+            self.signals.ready.emit(self.path, extra)
+        except RuntimeError:
+            # Signals object was destroyed before the worker finished.
+            pass
+
+
+class Sidebar(QTreeWidget):
+    """Left-hand nav: QUICK ACCESS (pins + known folders) and THIS PC.
+
+    The widget itself stays dumb: it emits:
+        * ``navigateTo(path)``         on click / Enter
+        * ``unpinFromSidebar(path)``   on Delete
+        * ``contextMenuRequested(path, global_pos)``
+
+    and provides a handful of tiny helpers used by FileManager when it
+    rebuilds the tree. All state (``cfg["pins"]`` / ``cfg["unpinned"]``)
+    lives in FileManager; the sidebar never mutates it.
+    """
+
+    navigateTo = Signal(str)
+    unpinFromSidebar = Signal(str)
+    contextMenuRequested = Signal(str, object)  # path, QPoint (global)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Sidebar")
+        self.setHeaderHidden(True)
+        self.setIndentation(10)
+        self.setRootIsDecorated(False)
+        self.setExpandsOnDoubleClick(False)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setUniformRowHeights(True)
+        self.setAnimated(False)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setColumnCount(1)
+        # itemAt(pos) wants viewport-relative coordinates, so the policy
+        # goes on the viewport, not on the tree widget itself.
+        self.viewport().setContextMenuPolicy(Qt.CustomContextMenu)
+        self.viewport().customContextMenuRequested.connect(
+            self._on_context_menu)
+        self.itemClicked.connect(self._on_item_clicked)
+
+    # --------------------------------------------------------- events
+    def _on_item_clicked(self, item, _col):
+        if item is None:
+            return
+        path = item.data(0, Qt.UserRole)
+        if path is not None:
+            self.navigateTo.emit(path)
+
+    def _on_context_menu(self, pos):
+        item = self.itemAt(pos)
+        if item is None:
+            return
+        path = item.data(0, Qt.UserRole)
+        if path is None:
+            return
+        self.contextMenuRequested.emit(path, self.viewport().mapToGlobal(pos))
+
+    def keyPressEvent(self, event):
+        # Delete -> unpin the selected entry.
+        if event.key() == Qt.Key_Delete:
+            item = self.currentItem()
+            if item is not None:
+                path = item.data(0, Qt.UserRole)
+                if path is not None:
+                    self.unpinFromSidebar.emit(path)
+                    return
+        # Enter -> navigate to the selected entry.
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            item = self.currentItem()
+            if item is not None:
+                path = item.data(0, Qt.UserRole)
+                if path is not None:
+                    self.navigateTo.emit(path)
+                    return
+        super().keyPressEvent(event)
+
+    # --------------------------------------------------------- helpers
+    def make_section(self, text, dim_color, clickable=False, path=None):
+        """Add a bold section header. Non-clickable headers use NoItemFlags
+        so they can't be selected or focused."""
+        item = QTreeWidgetItem([text])
+        if clickable:
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        else:
+            item.setFlags(Qt.NoItemFlags)
+        f = item.font(0)
+        f.setBold(True)
+        item.setFont(0, f)
+        item.setForeground(0, QColor(dim_color))
+        if path is not None:
+            item.setData(0, Qt.UserRole, path)
+        self.addTopLevelItem(item)
+        return item
+
+    def add_nav_item(self, parent, text, path, tooltip=""):
+        item = QTreeWidgetItem([text])
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+        item.setData(0, Qt.UserRole, path)
+        item.setToolTip(0, tooltip or str(path))
+        parent.addChild(item)
+        return item
+
+    def apply_header_colors(self, dim_color):
+        """Re-colour section headers (called from apply_theme)."""
+        for i in range(self.topLevelItemCount()):
+            top = self.topLevelItem(i)
+            top.setForeground(0, QColor(dim_color))
+
+    def sync_selection(self, path):
+        """Highlight `path` if present; clear selection otherwise."""
+        for i in range(self.topLevelItemCount()):
+            top = self.topLevelItem(i)
+            tpath = top.data(0, Qt.UserRole)
+            if tpath is not None and same_loc(tpath, path):
+                self.setCurrentItem(top)
+                self.scrollToItem(top)
+                return
+            for j in range(top.childCount()):
+                child = top.child(j)
+                cpath = child.data(0, Qt.UserRole)
+                if cpath is not None and same_loc(cpath, path):
+                    self.setCurrentItem(child)
+                    self.scrollToItem(child)
+                    return
+        self.clearSelection()
+        self.setCurrentItem(None)
+
+
 class FileManager(QMainWindow):
     def __init__(self, root, start):
         # ---- Tk shim --------------------------------------------------
@@ -223,6 +391,11 @@ class FileManager(QMainWindow):
         self.clip_mode = "copy"
         self._suppress_filter = False
 
+        # Drive usage cache: path -> "X GB used of Y GB (Z%)".
+        # Populated by background workers, kept across sidebar rebuilds.
+        self._drive_usage = {}
+        self._usage_signals = None    # created below, after _build_ui
+
         # Flash timer (status-bar override), replaced by QTimer.
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -234,7 +407,7 @@ class FileManager(QMainWindow):
         self._filter_timer.setInterval(150)
         self._filter_timer.timeout.connect(self._apply_filter_debounced)
 
-        # Tabs are stubbed at step 1; real switch arrives in step 4.
+        # Tabs are stubbed at step 1/2; real switch arrives in step 4.
         self.tabs = [Tab()]
         self.cur = 0
 
@@ -245,6 +418,11 @@ class FileManager(QMainWindow):
 
         self._build_ui()
         self.apply_theme()
+
+        # ---- sidebar data (needs self.palette to be set) -------------
+        self._usage_signals = _SidebarUsageSignals(self)
+        self._usage_signals.ready.connect(self._on_usage_ready)
+        self._populate_sidebar()
 
         # Initial navigation. __main__.py already validated `start`, but
         # be defensive here so unit-style imports never crash.
@@ -296,7 +474,7 @@ class FileManager(QMainWindow):
         self.path_edit.escapePressed.connect(self.on_path_escape)
         top.addWidget(self.path_edit, 1)
 
-        self.btn_pin = self._flat_btn("★", self.toggle_pin_current)
+        self.btn_pin = self._flat_btn("☆", self.toggle_pin_current)
         top.addWidget(self.btn_pin)
 
         top.addWidget(QLabel("🔍"))
@@ -309,7 +487,14 @@ class FileManager(QMainWindow):
 
         v.addLayout(top)
 
-        # --- file list --------------------------------------------------
+        # --- sidebar + file list (splitter) ----------------------------
+        self.sidebar = Sidebar()
+        self.sidebar.setMinimumWidth(160)
+        self.sidebar.setMaximumWidth(520)
+        self.sidebar.navigateTo.connect(self._on_sidebar_navigate)
+        self.sidebar.unpinFromSidebar.connect(self._on_sidebar_unpin)
+        self.sidebar.contextMenuRequested.connect(self._on_sidebar_context)
+
         self.model = FileListModel(self)
         self.view = QTableView()
         self.view.setModel(self.model)
@@ -331,7 +516,14 @@ class FileManager(QMainWindow):
         self.view.selectionModel().selectionChanged.connect(
             lambda *_: self.update_status())
 
-        v.addWidget(self.view, 1)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.addWidget(self.sidebar)
+        self.splitter.addWidget(self.view)
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([220, 960])
+        self.splitter.setChildrenCollapsible(False)
+        v.addWidget(self.splitter, 1)
 
         # --- status bar -------------------------------------------------
         self.status = QLabel("")
@@ -403,9 +595,38 @@ class FileManager(QMainWindow):
                 padding: 6px 14px;
                 border-radius: 3px;
             }}
+            QTreeWidget#Sidebar {{
+                background: {P['side']};
+                color: {P['fg']};
+                border: 1px solid {P['border']};
+                border-radius: 4px;
+                outline: none;
+            }}
+            QTreeWidget#Sidebar::item {{
+                padding: 5px 6px;
+                border-radius: 3px;
+            }}
+            QTreeWidget#Sidebar::item:hover {{
+                background: {P['hover']};
+            }}
+            QTreeWidget#Sidebar::item:selected {{
+                background: {P['sel_bg']};
+                color: {P['sel_fg']};
+            }}
+            QSplitter::handle {{
+                background: {P['bg']};
+            }}
+            QSplitter::handle:hover {{
+                background: {P['hover']};
+            }}
         """)
 
-        # ★ pin button reflects state (always dim at step 1).
+        # Section headers were coloured explicitly (setForeground). On a
+        # theme switch we need to re-apply that colour with the new palette.
+        if getattr(self, "sidebar", None) is not None:
+            self.sidebar.apply_header_colors(P["dim"])
+
+        # ★ pin button reflects current location's pin state.
         self._update_pin_button()
 
     def toggle_dark(self):
@@ -486,7 +707,10 @@ class FileManager(QMainWindow):
         self.reload()
         self.path_edit.setText(self.display_path(target))
         self._update_pin_button()
-        # save_tab is a stub at step 1; wired in step 4.
+        # Keep the sidebar in sync so it reflects the current location.
+        if getattr(self, "sidebar", None) is not None:
+            self.sidebar.sync_selection(target)
+        # save_tab is a stub at step 1/2; wired in step 4.
         return True
 
     def reload(self):
@@ -613,22 +837,214 @@ class FileManager(QMainWindow):
             dest = self.fwd.pop()
             self.navigate(dest, record=False)
 
-    # ------------------------------------------------------------- stubs
-    # These exist at step 1 so the toolbar buttons are wired; real behaviour
-    # arrives with the sidebar (step 2) and tabs (step 4).
+    # --------------------------------------------------------- sidebar
+    def _populate_sidebar(self):
+        """Rebuild the sidebar tree from cfg + known folders + drives."""
+        sb = self.sidebar
+        sb.clear()
+        self._add_quick_access()
+        self._add_this_pc()
+        if self.cwd:
+            sb.sync_selection(self.cwd)
+
+    def _add_quick_access(self):
+        sb = self.sidebar
+        header = sb.make_section("QUICK ACCESS", self.palette["dim"])
+
+        seen = []                       # list of paths already emitted
+
+        # 1. User pins, in cfg order, deduped by same_loc.
+        for path in self.cfg["pins"]:
+            if path in VIRTUAL:
+                continue
+            if any(same_loc(path, s) for s in seen):
+                continue
+            name = os.path.basename(path.rstrip(os.sep)) or path
+            icon = self._icon_for(path, name)
+            sb.add_nav_item(header, f"{icon} {name}", path, tooltip=path)
+            seen.append(path)
+
+        # 2. Known folders that aren't already shown and aren't unpinned.
+        for known_name, known_path in known_folders():
+            if any(same_loc(known_path, s) for s in seen):
+                continue
+            if any(same_loc(known_path, up) for up in self.cfg["unpinned"]):
+                continue
+            icon = QUICK_ICONS.get(known_name, "📁")
+            tip = known_name if known_path in VIRTUAL else known_path
+            sb.add_nav_item(header, f"{icon} {known_name}", known_path,
+                            tooltip=tip)
+            seen.append(known_path)
+
+        header.setExpanded(True)
+
+    def _add_this_pc(self):
+        sb = self.sidebar
+        # Clickable "THIS PC" header that navigates to the virtual drives view.
+        header = sb.make_section("THIS PC", self.palette["dim"],
+                                 clickable=True, path=THIS_PC)
+
+        drives = scan_drives(quick=True)
+        for drive in drives:
+            item = sb.add_nav_item(header, f"💾 {drive.name}", drive.path,
+                                   tooltip=drive.path)
+            # Re-apply cached usage if any, else spawn a worker.
+            extra = self._drive_usage.get(drive.path)
+            if extra:
+                self._apply_usage_text(item, drive.path, extra)
+            else:
+                task = _DriveUsageTask(drive.path, self._usage_signals)
+                QThreadPool.globalInstance().start(task)
+
+        header.setExpanded(True)
+
+    def _icon_for(self, path, name):
+        """Best-effort icon: known folder name first, then by known path."""
+        if name in QUICK_ICONS:
+            return QUICK_ICONS[name]
+        for known_name, known_path in known_folders():
+            if same_loc(known_path, path):
+                return QUICK_ICONS.get(known_name, "📁")
+        return "📁"
+
+    def _apply_usage_text(self, item, path, extra):
+        """Append "  NN.N%" to a drive item and stash the full text in the
+        tooltip. Called both when a worker finishes and on sidebar rebuild."""
+        m = _SIDEBAR_PCT_RE.search(extra)
+        if not m:
+            return
+        pct = m.group(1)
+        base = item.data(0, Qt.UserRole + 1)
+        if not base:
+            base = item.text(0)
+            item.setData(0, Qt.UserRole + 1, base)
+        item.setText(0, f"{base}  {pct}%")
+        item.setToolTip(0, f"{path}\n{extra}")
+
+    def _on_usage_ready(self, path, extra):
+        """Slot for the background disk-usage worker."""
+        self._drive_usage[path] = extra
+        # Find the drive item with this path and update it in place.
+        for i in range(self.sidebar.topLevelItemCount()):
+            top = self.sidebar.topLevelItem(i)
+            for j in range(top.childCount()):
+                child = top.child(j)
+                if child.data(0, Qt.UserRole) == path:
+                    self._apply_usage_text(child, path, extra)
+                    return
+
+    def _on_sidebar_navigate(self, path):
+        # Sidebar click / Enter — mirror what the main list would do.
+        if self.navigate(path) and self.view.hasFocus():
+            # only pull focus back when we're in "keyboard mode" already
+            self.view.setFocus()
+
+    def _on_sidebar_unpin(self, path):
+        if path in VIRTUAL:
+            self.flash("This location cannot be unpinned")
+            return
+        if not self.is_pinned(path):
+            # The Delete key is a no-op for non-pinned entries.
+            return
+        self.unpin_folder(path)
+        self.flash("Unpinned from Quick Access")
+
+    def _on_sidebar_context(self, path, global_pos):
+        menu = QMenu(self)
+        menu.addAction("Open", lambda: self.navigate(path))
+        if path not in VIRTUAL:
+            menu.addSeparator()
+            if self.is_pinned(path):
+                menu.addAction("Unpin from Quick Access",
+                               lambda: self._unpin_and_flash(path))
+            else:
+                menu.addAction("Pin to Quick Access",
+                               lambda: self._pin_and_flash(path))
+        menu.exec(global_pos)
+
+    def _pin_and_flash(self, path):
+        self.pin_folder(path)
+        self.flash("Pinned to Quick Access")
+
+    def _unpin_and_flash(self, path):
+        self.unpin_folder(path)
+        self.flash("Unpinned from Quick Access")
+
+    # ------------------------------------------- pin state (Quick Access)
+    def _remove_matching(self, lst, path):
+        matched = [p for p in lst if same_loc(p, path)]
+        for p in matched:
+            lst.remove(p)
+        return bool(matched)
+
+    def _matches_known(self, path):
+        return any(same_loc(kp, path) for _, kp in known_folders())
+
     def is_pinned(self, path):
-        return False
+        """True when `path` is currently shown under Quick Access."""
+        if not path or path in VIRTUAL:
+            return False
+        if any(same_loc(p, path) for p in self.cfg["pins"]):
+            return True
+        if any(same_loc(p, path) for p in self.cfg["unpinned"]):
+            return False
+        # Default: all default known folders start out pinned.
+        return any(same_loc(kp, path) for _, kp in known_folders())
+
+    def pin_folder(self, path):
+        if not path or path in VIRTUAL:
+            return
+        if self.is_pinned(path):
+            return
+        if self._matches_known(path):
+            # Re-enable a default folder: just drop it from unpinned.
+            self._remove_matching(self.cfg["unpinned"], path)
+        elif not any(same_loc(p, path) for p in self.cfg["pins"]):
+            self.cfg["pins"].append(path)
+        save_config(self.cfg)
+        self._populate_sidebar()
+        self._update_pin_button()
+
+    def unpin_folder(self, path):
+        if not path or path in VIRTUAL:
+            return
+        removed = self._remove_matching(self.cfg["pins"], path)
+        if not removed and self._matches_known(path):
+            if not any(same_loc(p, path) for p in self.cfg["unpinned"]):
+                self.cfg["unpinned"].append(path)
+                removed = True
+        if not removed:
+            return
+        save_config(self.cfg)
+        self._populate_sidebar()
+        self._update_pin_button()
 
     def toggle_pin_current(self):
-        self.flash("Pinning arrives in a later step")
+        if not self.cwd:
+            return
+        if self.cwd in VIRTUAL:
+            self.flash("This location cannot be pinned")
+            return
+        if self.is_pinned(self.cwd):
+            self._unpin_and_flash(self.cwd)
+        else:
+            self._pin_and_flash(self.cwd)
 
     def _update_pin_button(self):
         P = self.palette
+        if not self.cwd or self.cwd in VIRTUAL:
+            text, color = "☆", P["dim"]         # not pinnable here
+        elif self.is_pinned(self.cwd):
+            text, color = "★", P["accent"]      # currently pinned
+        else:
+            text, color = "☆", P["dim"]         # pinnable but not pinned
+        self.btn_pin.setText(text)
         self.btn_pin.setStyleSheet(
-            f"QToolButton {{ color: {P['dim']}; background: transparent; "
+            f"QToolButton {{ color: {color}; background: transparent; "
             f"border: none; padding: 2px 8px; }}"
         )
 
+    # ------------------------------------------------------- tabs (stub)
     def save_tab(self):
         # TODO step 4
         pass
