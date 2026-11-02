@@ -256,6 +256,7 @@ class FileManager(QMainWindow):
         # When the last window closes, exec() returns and so does __init__.
         # __main__.py's `root.mainloop()` then runs, hits the scheduled
         # root.destroy, and exits immediately.
+        self.show()
         self.app.exec()
 
     # ------------------------------------------------------------- UI build
