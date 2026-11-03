@@ -1400,8 +1400,9 @@ class FileManager(QMainWindow):
         self.view.setShowGrid(False)
         self.view.setSortingEnabled(False)
         self.view.verticalHeader().setVisible(False)
-        self.view.verticalHeader().setDefaultSectionSize(28)
+        self.view.verticalHeader().setDefaultSectionSize(23)
         self.view.setWordWrap(False)
+        self.view.setMouseTracking(True)
 
         # Right-click context menu for the file list.
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -1429,6 +1430,7 @@ class FileManager(QMainWindow):
         # --- status bar -------------------------------------------------
         self.status = QLabel("")
         self.status.setObjectName("StatusLabel")
+        self.status.setFixedHeight(22)
         v.addWidget(self.status)
 
         # --- menus + unified shortcuts -------------------------------
@@ -1498,8 +1500,19 @@ class FileManager(QMainWindow):
                 outline: none;
             }}
             QTableView::item {{
-                padding: 4px 10px;
+                padding: 2px 8px;
                 border: none;
+            }}
+            QTableView::item:hover {{
+                background: {P['hover']};
+            }}
+            QTableView::item:selected {{
+                background: {P['sel_bg']};
+                color: {P['sel_fg']};
+            }}
+            QTableView::item:selected:!active {{
+                background: {P['scroll']};
+                color: {P['fg']};
             }}
             QHeaderView {{
                 background: {P['head']};
@@ -1508,9 +1521,10 @@ class FileManager(QMainWindow):
                 background: {P['head']};
                 color: {P['dim']};
                 border: none;
+                border-right: 1px solid {P['border']};
                 border-bottom: 1px solid {P['border']};
-                padding: 8px 10px;
-                font-weight: 600;
+                padding: 6px 8px;
+                font-weight: normal;
             }}
             QHeaderView::section:hover {{
                 background: {P['hover']};
@@ -1527,10 +1541,12 @@ class FileManager(QMainWindow):
             }}
             QLineEdit:focus {{ border: 1px solid {P['accent']}; }}
             QLabel#StatusLabel {{
-                background: {P['side']};
+                background: {P['bg']};
                 color: {P['dim']};
-                padding: 6px 14px;
-                border-radius: 6px;
+                border-top: 1px solid {P['border']};
+                padding: 3px 10px;
+                border-radius: 0;
+                font-size: 9pt;
             }}
             QLabel#CaptureHint {{
                 color: {P['accent']};

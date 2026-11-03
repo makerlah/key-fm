@@ -1,11 +1,13 @@
 """Colour palettes."""
 
-LIGHT = dict(bg="#f3f4f7", fg="#1c1e26", field="#ffffff", side="#eceef3",
-             sel_bg="#dbe7ff", sel_fg="#101319", head="#f3f4f7",
-             border="#dcdfe6", entry="#ffffff", tab="#e4e7ee",
-             tab_sel="#ffffff", menu_bg="#ffffff", menu_active="#e6edff",
-             dim="#7a8090", scroll="#c4c9d4", accent="#3b6ef5",
-             accent_fg="#ffffff", hover="#e6e9f0", danger="#e5484d")
+LIGHT = dict(bg="#f0f0f0", fg="#202020", field="#ffffff",
+             side="#f5f5f5", sel_bg="#cce8ff", sel_fg="#000000",
+             head="#ffffff", border="#e5e5e5",
+             entry="#ffffff", tab="#f0f0f0", tab_sel="#ffffff",
+             menu_bg="#f0f0f0", menu_active="#cce8ff",
+             dim="#605e5c", scroll="#c8c8c8", accent="#0078d7",
+             accent_fg="#ffffff", hover="#e5f3ff",
+             danger="#c42b1c")
 DARK = dict(bg="#1a1b20", fg="#e6e8ee", field="#1f2026", side="#16171b",
             sel_bg="#2c446e", sel_fg="#ffffff", head="#1a1b20",
             border="#2b2d35", entry="#25272f", tab="#23252c",
