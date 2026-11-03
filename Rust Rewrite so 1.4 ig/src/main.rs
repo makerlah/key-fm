@@ -113,8 +113,15 @@ impl KeyFmApp {
         let dest_dir = std::path::PathBuf::from(&self.cwd);
         
         for src in &self.clipboard {
+            if src.is_dir() {
+                eprintln!("paste: skipping directory (not supported yet): {}", src.display());
+                continue;
+            }
             if let Some(file_name) = src.file_name() {
                 let dest = dest_dir.join(file_name);
+                if dest == *src {
+                    continue;
+                }
                 if self.clip_mode == "copy" {
                     let _ = std::fs::copy(src, &dest); 
                 } else {
