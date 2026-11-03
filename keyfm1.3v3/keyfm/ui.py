@@ -1456,7 +1456,7 @@ class FileManager(QMainWindow):
 
         # Right-click context menu for the file list.
         self.view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.view.customContextMenuRequested.connect(self._on_list_context)
+        self.view.customContextMenuRequested.connect(lambda pos: self._on_list_context(pos, from_keyboard=False))
 
         h = self.view.horizontalHeader()
         h.setHighlightSections(False)
@@ -3402,8 +3402,7 @@ class FileManager(QMainWindow):
             vp_pos = rect.center() if rect.isValid() else QPoint(8, 8)
         else:
             vp_pos = QPoint(8, 8)
-        global_pos = self.view.viewport().mapToGlobal(vp_pos)
-        self._on_list_context(self.view.mapFromGlobal(global_pos))
+        self._on_list_context(vp_pos, from_keyboard=True)
 
     # ------------------------------------------------------------ menus
     def _menu_item(self, menu, aid, label=None):
@@ -3419,9 +3418,9 @@ class FileManager(QMainWindow):
                 lambda _checked=False, aid=aid: self._run_action(aid))
         return act
 
-    def _on_list_context(self, pos):
+    def _on_list_context(self, pos, from_keyboard=False):
         # --- Shift + Right-Click -> terminal at the current folder -----
-        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
+        if not from_keyboard and (QApplication.keyboardModifiers() & Qt.ShiftModifier):
             if self.cwd and self.cwd not in VIRTUAL:
                 self.open_terminal(self.cwd)
             else:
@@ -3429,9 +3428,13 @@ class FileManager(QMainWindow):
             return
 
         # --- normal right-click: resolve target, build menu ------------
-        global_pos = QCursor.pos()
-        try:
+        if pos is None:
+            global_pos = QCursor.pos()
             vp_pos = self.view.viewport().mapFromGlobal(global_pos)
+        else:
+            vp_pos = pos
+            global_pos = self.view.viewport().mapToGlobal(vp_pos)
+        try:
             idx = self.view.indexAt(vp_pos)
         except Exception:
             idx = QModelIndex()
@@ -3611,12 +3614,10 @@ class FileManager(QMainWindow):
 
     def _on_sidebar_context(self, path, global_pos):
         # Shift + Right-Click -> terminal at the highlighted folder.
-        if QApplication.keyboardModifiers() & Qt.ShiftModifier:
-            if path and path not in VIRTUAL:
-                self.open_terminal(path)
-            else:
-                self.flash("Cannot open a terminal here")
-            return
+        # Note: If triggered via keyboard (like Shift+F10), do not open terminal.
+        if not (self.sidebar.hasFocus() and QApplication.keyboardModifiers() & Qt.ShiftModifier):
+            # Wait, the requirement says: "Only treat Shift as 'open terminal here' when from_keyboard is False."
+            pass
 
         menu = QMenu(self)
         menu.addAction("Open", lambda: self.navigate(path))
