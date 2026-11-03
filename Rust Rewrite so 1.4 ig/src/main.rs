@@ -17,6 +17,8 @@ struct KeyFmApp {
     selected_item: Option<usize>,
     filter: String,
     path_input: String,
+    tabs: Vec<Tab>,
+    cur_tab: usize,
 }
 
 impl KeyFmApp {
@@ -26,6 +28,7 @@ impl KeyFmApp {
         let start_dir = get_start_dir(start);
         let cwd = start_dir.to_string_lossy().to_string();
         let path_input = cwd.clone();
+        let mut tab = Tab::new(Some(start_dir.clone()));
         let mut app = Self {
             config,
             theme,
@@ -34,9 +37,54 @@ impl KeyFmApp {
             selected_item: None,
             filter: String::new(),
             path_input,
+            tabs: vec![tab],
+            cur_tab: 0,
         };
         app.refresh_dir();
         app
+    }
+
+    fn save_current_tab(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.cur_tab) {
+            tab.cwd = Some(std::path::PathBuf::from(&self.cwd));
+            tab.filter = self.filter.clone();
+            tab.focus = self.selected_item.and_then(|idx| self.entries.get(idx)).map(|item| item.path.clone());
+        }
+    }
+
+    fn load_tab(&mut self, index: usize) {
+        self.save_current_tab();
+        if index < self.tabs.len() {
+            self.cur_tab = index;
+            let tab = &self.tabs[self.cur_tab];
+            if let Some(ref cwd) = tab.cwd {
+                self.cwd = cwd.to_string_lossy().to_string();
+            }
+            self.filter = tab.filter.clone();
+            self.refresh_dir();
+            if let Some(ref focus) = tab.focus {
+                self.selected_item = self.entries.iter().position(|item| &item.path == focus);
+            }
+        }
+    }
+
+    fn new_tab(&mut self) {
+        self.save_current_tab();
+        let new_t = Tab::new(Some(std::path::PathBuf::from(&self.cwd)));
+        self.tabs.push(new_t);
+        let idx = self.tabs.len() - 1;
+        self.load_tab(idx);
+    }
+
+    fn close_tab(&mut self) {
+        if self.tabs.len() > 1 {
+            self.tabs.remove(self.cur_tab);
+            if self.cur_tab >= self.tabs.len() {
+                self.cur_tab = self.tabs.len() - 1;
+            }
+            let idx = self.cur_tab;
+            self.load_tab(idx);
+        }
     }
 
     fn refresh_dir(&mut self) {
@@ -106,6 +154,48 @@ impl eframe::App for KeyFmApp {
         visuals.selection.bg_fill = self.theme.sel_bg;
         visuals.selection.stroke.color = self.theme.fg;
         ctx.set_visuals(visuals);
+
+        // Top Menu Bar
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::menu::bar(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("New Tab").clicked() {
+                        self.new_tab();
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Tab").clicked() {
+                        self.close_tab();
+                        ui.close_menu();
+                    }
+                    if ui.button("Quit").clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                ui.menu_button("Edit", |ui::Ui| {});
+                ui.menu_button("View", |ui::Ui| {});
+                ui.menu_button("Go", |ui::Ui| {});
+            });
+        });
+
+        // Tab Bar
+        egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (i, tab) in self.tabs.iter().enumerate() {
+                    let title = tab.cwd.as_ref()
+                        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                        .unwrap_or_else(|| "Tab".to_string());
+                    if ui.selectable_label(self.cur_tab == i, title).clicked() {
+                        self.load_tab(i);
+                    }
+                }
+                if ui.button("+").clicked() {
+                    self.new_tab();
+                }
+                if self.tabs.len() > 1 && ui.button("x").clicked() {
+                    self.close_tab();
+                }
+            });
+        });
 
         // SidePanel (Sidebar)
                 egui::SidePanel::left("sidebar").show(ctx, |ui| {
