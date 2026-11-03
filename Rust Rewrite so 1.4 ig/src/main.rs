@@ -207,7 +207,8 @@ impl eframe::App for KeyFmApp {
             self.refresh_dir();
         }
     }
-    
+}
+
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = env::args().collect();
     for arg in &args {
