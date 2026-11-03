@@ -438,16 +438,18 @@ impl eframe::App for KeyFmApp {
             });
         });
 
-        // Dialog rendering
-        if let Some((ref action, ref mut input_val)) = self.active_dialog {
-            let mut close_dialog = false;
+        // Dialog rendering (take() so we never hold a borrow of self while
+        // touching the filesystem or refreshing the directory listing).
+        if let Some((action, mut input_val)) = self.active_dialog.take() {
             let mut confirm = false;
-            egui::Window::new(&action)
+            let mut cancel = false;
+
+            egui::Window::new(action.as_str())
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
                     ui.label(format!("Enter name for {}:", action));
-                    let resp = ui.text_edit_singleline(input_val);
+                    let resp = ui.text_edit_singleline(&mut input_val);
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         confirm = true;
                     }
@@ -456,35 +458,62 @@ impl eframe::App for KeyFmApp {
                             confirm = true;
                         }
                         if ui.button("Cancel").clicked() {
-                            close_dialog = true;
+                            cancel = true;
                         }
                     });
                 });
 
-            if confirm {
-                let current_cwd = self.cwd.clone();
-                let target_path = Path::new(&current_cwd);
-                if action == "NewFolder" {
-                    let _ = std::fs::create_dir(target_path.join(input_val));
-                    self.refresh_dir();
-                } else if action == "NewFile" {
-                    let _ = std::fs::File::create(target_path.join(input_val));
-                    self.refresh_dir();
-                } else if action == "Rename" {
-                    if let Some(idx) = self.selected_item {
-                        if let Some(item) = self.entries.get(idx) {
-                            let old_path = item.path.clone();
-                            let new_path = target_path.join(input_val);
-                            let _ = std::fs::rename(old_path, new_path);
-                            self.refresh_dir();
+            let name = input_val.trim().to_string();
+
+            if confirm && !name.is_empty() {
+                let base = std::path::PathBuf::from(&self.cwd);
+                let mut succeeded = false;
+
+                match action.as_str() {
+                    "NewFolder" => match std::fs::create_dir(base.join(&name)) {
+                        Ok(()) => succeeded = true,
+                        Err(e) => eprintln!("NewFolder failed: {}", e),
+                    },
+                    "NewFile" => match std::fs::File::create(base.join(&name)) {
+                        Ok(_) => succeeded = true,
+                        Err(e) => eprintln!("NewFile failed: {}", e),
+                    },
+                    "Rename" => {
+                        if let Some(idx) = self.selected_item {
+                            if let Some(item) = self.entries.get(idx) {
+                                let old_path = item.path.clone();
+                                let new_path = base.join(&name);
+                                match std::fs::rename(&old_path, &new_path) {
+                                    Ok(()) => succeeded = true,
+                                    Err(e) => eprintln!(
+                                        "Rename failed ({} -> {}): {}",
+                                        old_path.display(),
+                                        new_path.display(),
+                                        e
+                                    ),
+                                }
+                            } else {
+                                eprintln!("Rename failed: no item selected");
+                            }
+                        } else {
+                            eprintln!("Rename failed: no item selected");
                         }
                     }
+                    _ => {}
                 }
-                close_dialog = true;
-            }
 
-            if close_dialog {
-                self.active_dialog = None;
+                self.refresh_dir();
+
+                // Keep the just-created / renamed entry selected.
+                if succeeded {
+                    if let Some(pos) = self.entries.iter().position(|it| it.name == name) {
+                        self.selected_item = Some(pos);
+                    }
+                }
+                // Dialog is closed (we already took() it).
+            } else if !cancel {
+                // Keep it open and preserve whatever the user typed.
+                self.active_dialog = Some((action, input_val));
             }
         }
 
