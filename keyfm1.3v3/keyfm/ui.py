@@ -1420,6 +1420,8 @@ class FileManager(QMainWindow):
         top.addWidget(self.path_edit, 1)
 
         self.btn_pin = self._flat_btn("Pin", self.toggle_pin_current)
+        self.view.selectionModel().selectionChanged.connect(
+            lambda *_: self._update_pin_button())
         top.addWidget(self.btn_pin)
 
         self.search_edit = _FilterEdit()
@@ -1976,6 +1978,23 @@ class FileManager(QMainWindow):
     # --- quick access
     def _act_pin(self): self.toggle_pin_current()
     def _act_unpin(self):
+        folders = [it for it in self._selected_items() if it.is_dir]
+        if len(folders) == 1:
+            self._unpin_and_flash(folders[0].path)
+            return
+        if len(folders) > 1:
+            removed = 0
+            for it in folders:
+                if self.is_pinned(it.path):
+                    self.unpin_folder(it.path)
+                    removed += 1
+            if removed:
+                self.flash(
+                    f"Unpinned {removed} folder(s) from Quick Access")
+            else:
+                self.flash(
+                    "None of the selected folders are pinned")
+            return
         if self.cwd and self.cwd not in VIRTUAL:
             self._unpin_and_flash(self.cwd)
 
@@ -3632,6 +3651,27 @@ class FileManager(QMainWindow):
         self._update_pin_button()
 
     def toggle_pin_current(self):
+        folders = [it for it in self._selected_items() if it.is_dir]
+        if len(folders) == 1:
+            path = folders[0].path
+            if self.is_pinned(path):
+                self._unpin_and_flash(path)
+            else:
+                self._pin_and_flash(path)
+            return
+        if len(folders) > 1:
+            added = 0
+            for it in folders:
+                if not self.is_pinned(it.path):
+                    self.pin_folder(it.path)
+                    added += 1
+            if added:
+                self.flash(
+                    f"Pinned {added} folder(s) to Quick Access")
+            else:
+                self.flash(
+                    "All selected folders are already pinned")
+            return
         if not self.cwd:
             return
         if self.cwd in VIRTUAL:
@@ -3644,7 +3684,18 @@ class FileManager(QMainWindow):
 
     def _update_pin_button(self):
         P = self.palette
-        if self.cwd and self.cwd not in VIRTUAL and self.is_pinned(self.cwd):
+        folders = [it for it in self._selected_items() if it.is_dir]
+        if folders:
+            pinned = sum(1 for it in folders
+                         if self.is_pinned(it.path))
+            if pinned == len(folders):
+                color = P["accent"]
+                tip = "Unpin selected folder(s)"
+            else:
+                color = P["dim"]
+                tip = "Pin selected folder(s)"
+        elif (self.cwd and self.cwd not in VIRTUAL
+                and self.is_pinned(self.cwd)):
             color, tip = P["accent"], "Unpin this folder"
         else:
             color, tip = P["dim"], "Pin this folder"
