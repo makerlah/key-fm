@@ -229,21 +229,20 @@ class FileListModel(QAbstractTableModel):
         self.titles = dict(TITLES)
 
     def _icon_for(self, item):
+        if item.is_dir and self._is_drive_root(item.path):
+            key = "::drive:" + item.path
+            cached = self._icon_cache.get(key)
+            if cached is not None:
+                return cached
+            fm = self.parent()
+            if fm is not None and hasattr(fm, "_drive_icon"):
+                ic = fm._drive_icon(item.path)
+            else:
+                ic = self._icon_provider.icon(
+                    QFileIconProvider.Drive)
+            self._icon_cache[key] = ic
+            return ic
         if item.is_dir:
-            if self._is_drive_root(item.path):
-                key = "::drive:" + item.path
-                cached = self._icon_cache.get(key)
-                if cached is not None:
-                    return cached
-                ic = self._icon_provider.icon(QFileInfo(item.path))
-                if ic.isNull():
-                    ic = self._icon_provider.icon(
-                        QFileIconProvider.Drive)
-                if ic.isNull():
-                    ic = self._icon_provider.icon(
-                        QFileIconProvider.Computer)
-                self._icon_cache[key] = ic
-                return ic
             key = "::folder"
         else:
             key = (os.path.splitext(item.name)[1].lower()) or "::file"
