@@ -28,7 +28,7 @@ impl eframe::App for KeyFmApp {
             save_config(&self.config);
         }
 
-        eg::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("keyfm 1.3.0");
             ui.label(format!("Start dir: {:?}", self.start_dir));
             ui.label(format!("Dark mode: {} (Press Ctrl+Shift+D to toggle)", self.config.dark));
@@ -60,6 +60,6 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "keyfm",
         options,
-        Box::new(|_cc| Box::new(KeyFmApp::new(start))),
+        Box::new(|_cc| Ok(Box::new(KeyFmApp::new(start)))),
     )
 }

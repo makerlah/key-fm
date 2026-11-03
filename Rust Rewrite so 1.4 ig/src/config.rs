@@ -82,7 +82,7 @@ pub fn load_config() -> Config {
             if let Ok(bytes) = fs::read(&path) {
                 // Handle UTF-8 BOM if present (F-24)
                 let content = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                    String::from_utf8_lossy(&bytes[3:]).to_string()
+                    String::from_utf8_lossy(&bytes[3..]).to_string()
                 } else {
                     String::from_utf8_lossy(&bytes).to_string()
                 };
