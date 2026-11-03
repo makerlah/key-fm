@@ -428,7 +428,7 @@ impl eframe::App for KeyFmApp {
         });
 
         // Dialog rendering
-        if let Some((action, ref mut input_val)) = self.active_dialog {
+        if let Some((ref action, ref mut input_val)) = self.active_dialog {
             let mut close_dialog = false;
             let mut confirm = false;
             egui::Window::new(&action)
