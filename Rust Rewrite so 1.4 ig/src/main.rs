@@ -129,7 +129,7 @@ impl KeyFmApp {
         self.refresh_dir();
     }
 
-    fn delete_selected(&mut self, permanent: bool) {
+    fn delete_selected(&mut self, _permanent: bool) {
         if let Some(idx) = self.selected_item {
             if let Some(item) = self.entries.get(idx) {
                 let path = item.path.clone();
