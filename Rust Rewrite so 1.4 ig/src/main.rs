@@ -4,7 +4,7 @@ use keyfm::config::{load_config, Config};
 use keyfm::theme::{LIGHT, DARK, Theme};
 use keyfm::helpers::get_start_dir;
 
-use keyfm::models::Item;
+use keyfm::models::{Item, Tab};
 use keyfm::drives;
 use keyfm::helpers::{human_size, fmt_time};
 use std::path::Path;
