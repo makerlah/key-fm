@@ -231,19 +231,27 @@ class FileListModel(QAbstractTableModel):
     def _icon_for(self, item):
         if item.is_dir:
             if self._is_drive_root(item.path):
-                key = "::drive"
-            else:
-                key = "::folder"
+                key = "::drive:" + item.path
+                cached = self._icon_cache.get(key)
+                if cached is not None:
+                    return cached
+                ic = self._icon_provider.icon(QFileInfo(item.path))
+                if ic.isNull():
+                    ic = self._icon_provider.icon(
+                        QFileIconProvider.Drive)
+                if ic.isNull():
+                    ic = self._icon_provider.icon(
+                        QFileIconProvider.Computer)
+                self._icon_cache[key] = ic
+                return ic
+            key = "::folder"
         else:
             key = (os.path.splitext(item.name)[1].lower()) or "::file"
         cached = self._icon_cache.get(key)
         if cached is not None:
             return cached
         if item.is_dir:
-            if key == "::drive":
-                ic = self._icon_provider.icon(QFileIconProvider.Drive)
-            else:
-                ic = self._icon_provider.icon(QFileIconProvider.Folder)
+            ic = self._icon_provider.icon(QFileIconProvider.Folder)
         else:
             ic = self._icon_provider.icon(QFileInfo(item.path))
         self._icon_cache[key] = ic
@@ -254,8 +262,12 @@ class FileListModel(QAbstractTableModel):
         if not path:
             return False
         if IS_WIN:
-            return (len(path) == 3 and path[1] == ":"
-                    and path[2] in ("\\", "/"))
+            if len(path) == 2 and path[1] == ":":
+                return True
+            if (len(path) == 3 and path[1] == ":"
+                    and path[2] in ("\\", "/")):
+                return True
+            return False
         return path == "/"
 
     def set_rows(self, rows):
@@ -1190,11 +1202,13 @@ class Sidebar(QTreeWidget):
         self.addTopLevelItem(item)
         return item
 
-    def add_nav_item(self, parent, text, path, tooltip=""):
+    def add_nav_item(self, parent, text, path, tooltip="", icon=None):
         item = QTreeWidgetItem([text])
         item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         item.setData(0, Qt.UserRole, path)
         item.setToolTip(0, tooltip or str(path))
+        if icon is not None:
+            item.setIcon(0, icon)
         parent.addChild(item)
         return item
 
@@ -3370,8 +3384,9 @@ class FileManager(QMainWindow):
 
         drives = scan_drives(quick=True)
         for drive in drives:
+            icon = self._drive_icon(drive.path)
             item = sb.add_nav_item(header, drive.name, drive.path,
-                                   tooltip=drive.path)
+                                   tooltip=drive.path, icon=icon)
             extra = self._drive_usage.get(drive.path)
             if extra:
                 self._apply_usage_text(item, drive.path, extra)
@@ -3380,6 +3395,21 @@ class FileManager(QMainWindow):
                 QThreadPool.globalInstance().start(task)
 
         header.setExpanded(True)
+
+    def _drive_icon(self, path):
+        if not hasattr(self, "_sidebar_icon_cache"):
+            self._sidebar_icon_cache = {}
+        cached = self._sidebar_icon_cache.get(path)
+        if cached is not None:
+            return cached
+        provider = FileListModel._icon_provider
+        ic = provider.icon(QFileInfo(path))
+        if ic.isNull():
+            ic = provider.icon(QFileIconProvider.Drive)
+        if ic.isNull():
+            ic = provider.icon(QFileIconProvider.Computer)
+        self._sidebar_icon_cache[path] = ic
+        return ic
 
     def _apply_usage_text(self, item, path, extra):
         m = _SIDEBAR_PCT_RE.search(extra)
