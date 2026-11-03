@@ -230,18 +230,33 @@ class FileListModel(QAbstractTableModel):
 
     def _icon_for(self, item):
         if item.is_dir:
-            key = "::folder"
+            if self._is_drive_root(item.path):
+                key = "::drive"
+            else:
+                key = "::folder"
         else:
             key = (os.path.splitext(item.name)[1].lower()) or "::file"
         cached = self._icon_cache.get(key)
         if cached is not None:
             return cached
         if item.is_dir:
-            ic = self._icon_provider.icon(QFileIconProvider.Folder)
+            if key == "::drive":
+                ic = self._icon_provider.icon(QFileIconProvider.Drive)
+            else:
+                ic = self._icon_provider.icon(QFileIconProvider.Folder)
         else:
             ic = self._icon_provider.icon(QFileInfo(item.path))
         self._icon_cache[key] = ic
         return ic
+
+    @staticmethod
+    def _is_drive_root(path):
+        if not path:
+            return False
+        if IS_WIN:
+            return (len(path) == 3 and path[1] == ":"
+                    and path[2] in ("\\", "/"))
+        return path == "/"
 
     def set_rows(self, rows):
         if len(rows) == len(self.rows) and all(
@@ -2881,7 +2896,7 @@ class FileManager(QMainWindow):
         if not items:
             self.flash("Nothing selected")
             return
-        if self.cwd in VIRTUAL:
+        if self.cwd in VIRTUAL and not permanent:
             self.flash("Cannot delete here")
             return
         if permanent:
