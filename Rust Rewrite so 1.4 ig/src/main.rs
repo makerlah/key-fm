@@ -86,6 +86,28 @@ impl eframe::App for KeyFmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut navigate_to: Option<String> = None;
 
+        // 1. Apply Theme
+        let mut visuals = if self.config.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        visuals.window_fill = self.theme.bg;
+        visuals.panel_fill = self.theme.bg;
+        visuals.override_text_color = Some(self.theme.fg);
+        visuals.widgets.noninteractive.bg_fill = self.theme.bg;
+        visuals.widgets.noninteractive.fg_stroke.color = self.theme.fg;
+        visuals.widgets.inactive.bg_fill = self.theme.field;
+        visuals.widgets.inactive.fg_stroke.color = self.theme.fg;
+        visuals.widgets.hovered.bg_fill = self.theme.sel_bg;
+        visuals.widgets.hovered.fg_stroke.color = self.theme.fg;
+        visuals.widgets.active.bg_fill = self.theme.sel_bg;
+        visuals.widgets.active.fg_stroke.color = self.theme.fg;
+        visuals.selection.bg_fill = self.theme.sel_bg;
+        visuals.selection.stroke.color = self.theme.fg;
+        ctx.set_visuals(visuals);
+
+        // 2. Keyboard Input Handling
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
                 let max_idx = self.entries.len().saturating_sub(1);
@@ -110,7 +132,7 @@ impl eframe::App for KeyFmApp {
                 }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
-                if let Some(parent) = Path::new(&self.cwd).parent() {
+                if let Some(parent) = std::path::Path::new(&self.cwd).parent() {
                     navigate_to = Some(parent.to_string_lossy().to_string());
                 }
             }
@@ -119,78 +141,40 @@ impl eframe::App for KeyFmApp {
             }
         }
 
-        let mut visuals = if self.config.dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        visuals.window_fill = self.theme.bg;
-        visuals.panel_fill = self.theme.bg;
-        visuals.override_text_color = Some(self.theme.fg);
-        visuals.widgets.noninteractive.bg_fill = self.theme.bg;
-        visuals.widgets.noninteractive.fg_stroke.color = self.theme.fg;
-        visuals.widgets.inactive.bg_fill = self.theme.field;
-        visuals.widgets.inactive.fg_stroke.color = self.theme.fg;
-        visuals.widgets.hovered.bg_fill = self.theme.sel_bg;
-        visuals.widgets.hovered.fg_stroke.color = self.theme.fg;
-        visuals.widgets.active.bg_fill = self.theme.sel_bg;
-        visuals.widgets.active.fg_stroke.color = self.theme.fg;
-        visuals.selection.bg_fill = self.theme.sel_bg;
-        visuals.selection.stroke.color = self.theme.fg;
-        ctx.set_visuals(visuals);
-
+        // 3. Top Toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Back").clicked() {
-                    if let Some(parent) = Path::new(&self.cwd).parent() {
-                        self.cwd = parent.to_string_lossy().to_string();
-                        self.refresh_dir();
+                    if let Some(parent) = std::path::Path::new(&self.cwd).parent() {
+                        navigate_to = Some(parent.to_string_lossy().to_string());
                     }
                 }
                 if ui.button("Forward").clicked() {
                     // Forward navigation placeholder
                 }
                 if ui.button("Up").clicked() {
-                    if let Some(parent) = Path::new(&self.cwd).parent() {
-                        self.cwd = parent.to_string_lossy().to_string();
-                        self.refresh_dir();
+                    if let Some(parent) = std::path::Path::new(&self.cwd).parent() {
+                        navigate_to = Some(parent.to_string_lossy().to_string());
                     }
                 }
                 ui.label("Path:");
                 let resp = ui.text_edit_singleline(&mut self.path_input);
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.cwd = self.path_input.clone();
-                    self.refresh_dir();
+                    navigate_to = Some(self.path_input.clone());
                 }
                 ui.label("Filter:");
                 ui.text_edit_singleline(&mut self.filter);
             });
         });
 
+        // 4. Bottom Status Bar
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("{} items", self.entries.len()));
             });
         });
 
-        egui::SidePanel::left("sidebar").show(ctx, |ui| {
-            ui.heading("Quick Access");
-            for (label, path) in drives::known_folders() {
-                if ui.button(label).clicked() {
-                    self.cwd = path.to_string_lossy().to_string();
-                    self.refresh_dir();
-                }
-            }
-            ui.separator();
-            ui.heading("This PC");
-            for (label, path) in drives::scan_drives() {
-                if ui.button(label).clicked() {
-                    self.cwd = path.to_string_lossy().to_string();
-                    self.refresh_dir();
-                }
-            }
-        });
-
+        // 5. Central Panel (File List)
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let filter = self.filter.to_lowercase();
@@ -220,7 +204,7 @@ impl eframe::App for KeyFmApp {
                                     }
                                     if resp.double_clicked() {
                                         if item.is_dir {
-                                            next_dir = Some(item.path.to_string_lossy().to_string());
+                                            navigate_to = Some(item.path.to_string_lossy().to_string());
                                         }
                                     }
                                 });
@@ -236,6 +220,7 @@ impl eframe::App for KeyFmApp {
             });
         });
 
+        // 6. Apply Navigation (Must be at the very end!)
         if let Some(new_path) = navigate_to {
             self.cwd = new_path;
             self.refresh_dir();
