@@ -1,6 +1,6 @@
 use directories::UserDirs;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use crate::constants::{THIS_PC, RECYCLE};
 
 pub fn human_size(n: u64) -> String {
@@ -24,7 +24,7 @@ pub fn fmt_time(ts: Option<f64>) -> String {
     }
     let secs = t.trunc() as i64;
     let nsecs = ((t.fract() * 1e9).abs()) as u32;
-    let dt = DateTime::<Local>::from_timestamp(secs, nsecs);
+    let dt = DateTime::<Utc>::from_timestamp(secs, nsecs).map(|d| d.with_timezone(&Local));
     match dt {
         Some(d) => d.format("%Y-%m-%d %H:%M").to_string(),
         None => String::new(),
