@@ -1422,12 +1422,13 @@ class FileManager(QMainWindow):
         self.btn_pin = self._flat_btn("Pin", self.toggle_pin_current)
         top.addWidget(self.btn_pin)
 
-        self.filter_edit = _FilterEdit()
-        self.filter_edit.setMaximumWidth(220)
-        self.filter_edit.textChanged.connect(self.on_filter_change)
-        self.filter_edit.escapePressed.connect(self.on_filter_escape)
-        self.filter_edit.downPressed.connect(self.focus_tree)
-        top.addWidget(self.filter_edit)
+        self.search_edit = _FilterEdit()
+        self.search_edit.setPlaceholderText("Search")
+        self.search_edit.setMaximumWidth(240)
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(self._on_search_edit_changed)
+        self.search_edit.escapePressed.connect(self._on_search_edit_escape)
+        top.addWidget(self.search_edit)
 
         v.addLayout(top)
 
@@ -1475,6 +1476,14 @@ class FileManager(QMainWindow):
         self.splitter.setSizes([220, 960])
         self.splitter.setChildrenCollapsible(False)
         v.addWidget(self.splitter, 1)
+
+        self.filter_edit = _FilterEdit()
+        self.filter_edit.setMaximumWidth(220)
+        self.filter_edit.setVisible(False)
+        self.filter_edit.textChanged.connect(self.on_filter_change)
+        self.filter_edit.escapePressed.connect(self.on_filter_escape)
+        self.filter_edit.downPressed.connect(self.focus_tree)
+        v.addWidget(self.filter_edit)
 
         # --- status bar -------------------------------------------------
         self.status = QLabel("")
@@ -2530,6 +2539,7 @@ class FileManager(QMainWindow):
             self.view.setCurrentIndex(self.model.index(0, 0))
             self.view.selectRow(0)
         self.update_status()
+        self._sync_search_box_from_filter()
 
     # ------------------------------------------------ system-wide search
     def _start_search(self, query):
@@ -2640,12 +2650,37 @@ class FileManager(QMainWindow):
             self.path_edit.setText(self.display_path(self.cwd))
         self.view.setFocus()
 
+    def _on_search_edit_changed(self, text):
+        if self.cwd != THIS_PC:
+            self.filter_edit.blockSignals(True)
+            try:
+                self.filter_edit.setText(text)
+            finally:
+                self.filter_edit.blockSignals(False)
+            self.apply_filter_and_sort()
+            return
+        self._filter_timer.start()
+
+    def _on_search_edit_escape(self):
+        self.search_edit.clear()
+        self.view.setFocus()
+
+    def _sync_search_box_from_filter(self):
+        if self.search_edit.text() != self.filter_edit.text():
+            self.search_edit.blockSignals(True)
+            try:
+                self.search_edit.setText(self.filter_edit.text())
+            finally:
+                self.search_edit.blockSignals(False)
+
     def focus_filter(self):
+        self.filter_edit.setVisible(True)
         self.filter_edit.setFocus()
         self.filter_edit.selectAll()
 
     def on_filter_escape(self):
         self.filter_edit.clear()
+        self.filter_edit.setVisible(False)
         self.apply_filter_and_sort()
         self.view.setFocus()
 
