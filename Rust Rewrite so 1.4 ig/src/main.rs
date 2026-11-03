@@ -84,6 +84,7 @@ impl KeyFmApp {
 
 impl eframe::App for KeyFmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut next_dir: Option<String> = None;
         let mut visuals = if self.config.dark {
             egui::Visuals::dark()
         } else {
@@ -169,7 +170,6 @@ impl eframe::App for KeyFmApp {
                         header.col(|ui| { ui.strong("Modified"); });
                     })
                     .body(|mut body| {
-                        let mut next_dir: Option<String> = None;
                         for (idx, item) in self.entries.iter().enumerate() {
                             if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
                                 continue;
