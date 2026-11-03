@@ -1420,8 +1420,6 @@ class FileManager(QMainWindow):
         top.addWidget(self.path_edit, 1)
 
         self.btn_pin = self._flat_btn("Pin", self.toggle_pin_current)
-        self.view.selectionModel().selectionChanged.connect(
-            lambda *_: self._update_pin_button())
         top.addWidget(self.btn_pin)
 
         self.search_edit = _FilterEdit()
@@ -1469,6 +1467,8 @@ class FileManager(QMainWindow):
 
         self.view.selectionModel().selectionChanged.connect(
             lambda *_: self.update_status())
+        self.view.selectionModel().selectionChanged.connect(
+            lambda *_: self._update_pin_button())
 
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.sidebar)
