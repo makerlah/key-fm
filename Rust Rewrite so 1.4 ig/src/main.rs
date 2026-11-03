@@ -108,18 +108,20 @@ impl eframe::App for KeyFmApp {
         ctx.set_visuals(visuals);
 
         // SidePanel (Sidebar)
-        egui::SidePanel::left("sidebar").show(ctx, |ui| {
+                egui::SidePanel::left("sidebar").show(ctx, |ui| {
             ui.heading("Quick Access");
             for (label, path) in drives::known_folders() {
                 if ui.button(label).clicked() {
-                    navigate_to = Some(path);
+                    // Convert PathBuf to String
+                    navigate_to = Some(path.to_string_lossy().to_string());
                 }
             }
-            ui.separator();
+            ui.separator(); 
             ui.heading("This PC");
-            for drive in drives::scan_drives() {
-                if ui.button(&drive.name).clicked() {
-                    navigate_to = Some(drive.path.to_string_lossy().to_string());
+            // scan_drives returns a tuple (String, PathBuf), so we destructure it here
+            for (name, path) in drives::scan_drives() {
+                if ui.button(&name).clicked() {
+                    navigate_to = Some(path.to_string_lossy().to_string());
                 }
             }
         });
