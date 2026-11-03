@@ -84,7 +84,41 @@ impl KeyFmApp {
 
 impl eframe::App for KeyFmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut next_dir: Option<String> = None;
+        let mut navigate_to: Option<String> = None;
+
+        if !ctx.wants_keyboard_input() {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                let max_idx = self.entries.len().saturating_sub(1);
+                self.selected_item = Some(match self.selected_item {
+                    Some(idx) => (idx + 1).min(max_idx),
+                    None => 0,
+                });
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                self.selected_item = Some(match self.selected_item {
+                    Some(idx) => idx.saturating_sub(1),
+                    None => 0,
+                });
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(idx) = self.selected_item {
+                    if let Some(item) = self.entries.get(idx) {
+                        if item.is_dir {
+                            navigate_to = Some(item.path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
+                if let Some(parent) = Path::new(&self.cwd).parent() {
+                    navigate_to = Some(parent.to_string_lossy().to_string());
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+                self.refresh_dir();
+            }
+        }
+
         let mut visuals = if self.config.dark {
             egui::Visuals::dark()
         } else {
@@ -202,9 +236,10 @@ impl eframe::App for KeyFmApp {
             });
         });
 
-        if let Some(new_dir) = next_dir {
-            self.cwd = new_dir;
+        if let Some(new_path) = navigate_to {
+            self.cwd = new_path;
             self.refresh_dir();
+            self.selected_item = Some(0);
         }
     }
 }
