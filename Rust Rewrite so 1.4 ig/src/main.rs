@@ -286,6 +286,10 @@ impl eframe::App for KeyFmApp {
                     }
                 }
 
+                if let Some(tab_idx) = switch_to_tab {
+                    self.load_tab(tab_idx);
+                }
+
                 if ui.button("+").clicked() {
                     self.new_tab();
                 }
