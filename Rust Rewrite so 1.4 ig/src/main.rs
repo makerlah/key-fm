@@ -4,10 +4,19 @@ use keyfm::config::{load_config, save_config, Config};
 use keyfm::theme::{LIGHT, DARK, Theme};
 use keyfm::helpers::get_start_dir;
 
+use keyfm::models::Item;
+use keyfm::drives;
+use keyfm::helpers::{human_size, fmt_time, get_start_dir};
+use std::path::{Path, PathBuf};
+
 struct KeyFmApp {
     config: Config,
     theme: Theme,
-    start_dir: std::path::PathBuf,
+    cwd: String,
+    entries: Vec<Item>,
+    selected_item: Option<usize>,
+    filter: String,
+    path_input: String,
 }
 
 impl KeyFmApp {
@@ -15,23 +24,156 @@ impl KeyFmApp {
         let config = load_config();
         let theme = if config.dark { DARK } else { LIGHT };
         let start_dir = get_start_dir(start);
-        Self { config, theme, start_dir }
+        let cwd = start_dir.to_string_lossy().to_string();
+        let path_input = cwd.clone();
+        let mut app = Self {
+            config,
+            theme,
+            cwd,
+            entries: Vec::new(),
+            selected_item: None,
+            filter: String::new(),
+            path_input,
+        };
+        app.refresh_dir();
+        app
+    }
+
+    fn refresh_dir(&mut self) {
+        self.entries.clear();
+        let path = Path::new(&self.cwd);
+        if let Ok(read_dir) = std::fs::read_dir(path) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if !self.config.show_hidden && name.starts_with('.') {
+                    continue;
+                }
+                let metadata = entry.metadata().ok();
+                let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                let size = metadata.as_ref().map(|m| if is_dir { 0 } else { m.len() }).unwrap_or(0);
+                let mtime = metadata.as_ref().and_then(|m| m.modified().ok()).and_then(|t| {
+                    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+                });
+                let hidden = name.starts_with('.');
+
+                self.entries.push(Item {
+                    name,
+                    path,
+                    is_dir,
+                    size,
+                    mtime,
+                    hidden,
+                    extra: String::new(),
+                    orig: None,
+                    info: String::new(),
+                });
+            }
+        }
+        self.entries.sort_by(|a, b| {
+            if a.is_dir != b.is_dir {
+                b.is_dir.cmp(&a.is_dir)
+            } else {
+                a.name.to_lowercase().cmp(&b.name.to_lowercase())
+            }
+        });
+        self.path_input = self.cwd.clone();
     }
 }
 
 impl eframe::App for KeyFmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Toggle theme with Ctrl+Shift+D for testing Phase 1
         if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::D)) {
             self.config.dark = !self.config.dark;
             self.theme = if self.config.dark { DARK } else { LIGHT };
             save_config(&self.config);
         }
 
+        let mut visuals = if self.config.dark {
+            egui::Visuals::dark()
+        } else {
+            egui::Visuals::light()
+        };
+        visuals.window_fill = self.theme.bg;
+        visuals.panel_fill = self.theme.bg;
+        visuals.override_text_color = Some(self.theme.fg);
+        ctx.set_visuals(visuals);
+
+        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Back").clicked() {
+                    if let Some(parent) = Path::new(&self.cwd).parent() {
+                        self.cwd = parent.to_string_lossy().to_string();
+                        self.refresh_dir();
+                    }
+                }
+                if ui.button("Up").clicked() {
+                    if let Some(parent) = Path::new(&self.cwd).parent() {
+                        self.cwd = parent.to_string_lossy().to_string();
+                        self.refresh_dir();
+                    }
+                }
+                ui.label("Path:");
+                let resp = ui.text_editing_singleline(&mut self.path_input);
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    self.cwd = self.path_input.clone();
+                    self.refresh_dir();
+                }
+                ui.label("Filter:");
+                ui.text_editing_singleline(&mut self.filter);
+            });
+        });
+
+        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("{} items", self.entries.len()));
+            });
+        });
+
+        egui::SidePanel::left("sidebar").show(ctx, |ui| {
+            ui.heading("Quick Access");
+            for (label, path) in drives::known_folders() {
+                if ui.button(label).clicked() {
+                    self.cwd = path.to_string_lossy().to_string();
+                    self.refresh_dir();
+                }
+            }
+            ui.separator();
+            ui.heading("This PC");
+            for (label, path) in drives::scan_drives() {
+                if ui.button(label).clicked() {
+                    self.cwd = path.to_string_lossy().to_string();
+                    self.refresh_dir();
+                }
+            }
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("keyfm 1.3.0");
-            ui.label(format!("Start dir: {:?}", self.start_dir));
-            ui.label(format!("Dark mode: {} (Press Ctrl+Shift+D to toggle)", self.config.dark));
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let filter = self.filter.to_lowercase();
+                for (idx, item) in self.entries.iter().enumerate() {
+                    if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
+                        continue;
+                    }
+                    let name_str = if item.is_dir { format!("{}/", item.name) } else { item.name.clone() };
+                    let size_str = if item.is_dir { "".to_string() } else { human_size(item.size) };
+                    let time_str = fmt_time(item.mtime);
+
+                    let row_text = format!("{:<35}  {:>10}  {}", name_str, size_str, time_str);
+                    let resp = ui.selectable_label(self.selected_item == Some(idx), row_text);
+                    if resp.clicked() {
+                        self.selected_item = Some(idx);
+                    }
+                    if resp.double_clicked() {
+                        if item.is_dir {
+                            self.cwd = item.path.to_string_lossy().to_string();
+                            self.refresh_dir();
+                            self.selected_item = None;
+                            break;
+                        }
+                    }
+                }
+            });
         });
     }
 }
