@@ -1177,7 +1177,7 @@ class Sidebar(QTreeWidget):
     navigateTo = Signal(str)
     escapePressed = Signal()
     unpinFromSidebar = Signal(str)
-    contextMenuRequested = Signal(str, object)
+    contextMenuRequested = Signal(str, object, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1212,12 +1212,23 @@ class Sidebar(QTreeWidget):
         path = item.data(0, Qt.UserRole)
         if path is None:
             return
-        self.contextMenuRequested.emit(path, self.viewport().mapToGlobal(pos))
+        self.contextMenuRequested.emit(path, self.viewport().mapToGlobal(pos), False)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.escapePressed.emit()
             return
+        if event.key() == Qt.Key_Menu or (event.key() == Qt.Key_F10 and (event.modifiers() & Qt.ShiftModifier)):
+            item = self.currentItem()
+            if item is not None:
+                path = item.data(0, Qt.UserRole)
+                if path is not None:
+                    rect = self.visualItemRect(item)
+                    vp_pos = rect.center() if rect.isValid() else QPoint(8, 8)
+                    global_pos = self.viewport().mapToGlobal(vp_pos)
+                    self.contextMenuRequested.emit(path, global_pos, True)
+                    event.accept()
+                    return
         if event.key() == Qt.Key_Delete:
             item = self.currentItem()
             if item is not None:
@@ -3612,12 +3623,14 @@ class FileManager(QMainWindow):
         self.unpin_folder(path)
         self.flash("Unpinned from Quick Access")
 
-    def _on_sidebar_context(self, path, global_pos):
+    def _on_sidebar_context(self, path, global_pos, from_keyboard=False):
         # Shift + Right-Click -> terminal at the highlighted folder.
-        # Note: If triggered via keyboard (like Shift+F10), do not open terminal.
-        if not (self.sidebar.hasFocus() and QApplication.keyboardModifiers() & Qt.ShiftModifier):
-            # Wait, the requirement says: "Only treat Shift as 'open terminal here' when from_keyboard is False."
-            pass
+        if not from_keyboard and (QApplication.keyboardModifiers() & Qt.ShiftModifier):
+            if path and path not in VIRTUAL:
+                self.open_terminal(path)
+            else:
+                self.flash("Cannot open a terminal here")
+            return
 
         menu = QMenu(self)
         menu.addAction("Open", lambda: self.navigate(path))
@@ -3634,7 +3647,7 @@ class FileManager(QMainWindow):
             else:
                 menu.addAction("Pin to Quick Access",
                                lambda: self._pin_and_flash(path))
-        menu.exec(QCursor.pos())
+        menu.exec(global_pos if global_pos is not None else QCursor.pos())
 
     def _pin_and_flash(self, path):
         self.pin_folder(path)
