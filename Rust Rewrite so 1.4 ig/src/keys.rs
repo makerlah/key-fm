@@ -155,9 +155,9 @@ pub fn norm_spec(spec: &str) -> String {
     }
     let aliases = get_key_aliases();
     let display = get_key_display();
-    let lookup_key = aliases.get(key.as_str()).unwrap_or(&key.as_str());
-    let final_key = display.get(*lookup_key).unwrap_or(lookup_key);
-    
+    let key_str = key.as_str();
+    let lookup_key = aliases.get(key_str).unwrap_or(&key_str);
+    let final_key = display.get(*lookup_key).unwrap_or(lookup_key);    
     let key_str = if final_key.len() == 1 && final_key.chars().all(char::is_alphabetic) {
         final_key.to_uppercase()
     } else {
@@ -205,8 +205,8 @@ pub fn key_sequences(spec: &str) -> Vec<String> {
         }
     }
     let aliases = get_key_aliases();
-    let keysym = aliases.get(key.as_str()).unwrap_or(&key.as_str());
-    let mut syms = Vec::new();
+    let key_str = key.as_str();
+    let keysym = aliases.get(key_str).unwrap_or(&key_str);    let mut syms = Vec::new();
     if keysym.len() == 1 && keysym.chars().all(char::is_alphabetic) {
         syms.push(keysym.to_lowercase());
         syms.push(keysym.to_uppercase());
