@@ -177,23 +177,27 @@ impl eframe::App for KeyFmApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Edit", |ui::Ui| {});
-                ui.menu_button("View", |ui::Ui| {});
-                ui.menu_button("Go", |ui::Ui| {});
+                ui.menu_button("Edit", |ui| {});
+                ui.menu_button("View", |ui| {});
+                ui.menu_button("Go", |ui| {});
             });
         });
 
         // Tab Bar
         egui::TopBottomPanel::top("tab_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let mut switch_to_tab: Option<usize> = None;
                 for (i, tab) in self.tabs.iter().enumerate() {
                     let title = tab.cwd.as_ref()
                         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
                         .unwrap_or_else(|| "Tab".to_string());
+                    
+                    // 2. Change what happens on click
                     if ui.selectable_label(self.cur_tab == i, title).clicked() {
-                        self.load_tab(i);
+                        switch_to_tab = Some(i);
                     }
                 }
+
                 if ui.button("+").clicked() {
                     self.new_tab();
                 }
