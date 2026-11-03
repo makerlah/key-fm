@@ -1,0 +1,219 @@
+BUGS Categorization 
+
+🔴 RED — fix now
+=====================================================
+[14] Double-clicking a folder in the list does not enter it
+     File:      ui.py, FileManager._build_ui() / LassoTableView
+     Symptom:   Double-clicking a folder in the file list just selects it;
+                it never navigates into it. Enter still works.
+     Cause:     QTableView emits doubleClicked, but _build_ui only connects
+                customContextMenuRequested and selectionChanged. Neither
+                view.doubleClicked nor view.activated is connected, and
+                LassoTableView doesn't override mouseDoubleClickEvent.
+                With NoEditTriggers set, the default QTableView double-click
+                handler does nothing, so the signal is emitted into the void.
+     Fix idea:  In _build_ui (right after building self.view), add:
+                    self.view.doubleClicked.connect(
+                        lambda _idx: self.open_current())
+                (Optionally also connect view.activated for style-agnostic
+                Enter activation; harmless since Enter already routes through
+                the open QShortcut.)
+     Trigger:   Every time. This is a critical usability regression.
+     Found by:  user report
+
+[15] "Open with…" is broken (needs debugging to localise)
+     File:      ui.py, do_open_with() / OpenWithDialog / _AppLoaderThread
+     Symptom:   User reports Open With does not work. Needs verification of
+                the exact failure mode: (a) dialog never appears, (b) dialog
+                appears but the app list stays empty / "Loading…", (c) picking
+                an app and pressing Open does nothing, (d) app list populates
+                but launch silently fails.
+     Cause:     Cannot confirm from static analysis — the flow
+                do_open_with → OpenWithDialog → _do_open → launch_with
+                looks correct. Most likely causes, in order:
+                  a) Race: _on_apps_loaded never fires (or fires after the
+                     user pressed Open) so self._apps stays [] and the list
+                     is empty. Clicking Open then hits the `item is None`
+                     branch ("Please pick an application first") even though
+                     there is literally nothing to pick. This looks broken
+                     to the user.
+                  b) list_apps() returns an empty list on the user's machine
+                     (PowerShell unavailable AND the App Paths registry scan
+                     returning nothing). _populate then empties the list and
+                     the dialog shows a blank white pane with no hint.
+                  c) An exception is raised inside OpenWithDialog._build
+                     (e.g. QDialogButtonBox.Open behaviour differing between
+                     PySide6 builds). _run_action swallows it via
+                     traceback.print_exc(), so the user sees nothing.
+                  d) The chosen app launches but exits immediately; launch_with
+                     returns True before the crash so no flash is shown.
+     Fix idea:  (i) If self._apps is empty after load finishes, add a
+                "No applications found" placeholder item and disable the
+                Open button. (ii) In _do_open, if the current item has no
+                UserRole dict, flash a visible message rather than silently
+                returning. (iii) While loading, disable the Open button so
+                the user can't race the thread. (iv) Print dlg.chosen and
+                chosen["argv"] to stderr (or a flash) just before
+                launch_with, so the next bug report pinpoints the failure.
+     Trigger:   User report — needs a repro to nail the exact branch.
+     Found by:  user report
+
+🟠 ORANGE — fix before next release
+=====================================================
+[1] Tab selection silently lost on every tab switch
+     File:      ui.py, FileManager.load_tab()
+     Symptom:   Switching tabs always resets the selection to row 0. Any
+                saved multi-selection and focus row in Tab.sel / Tab.focus
+                are ignored.
+     Cause:     navigate() ends with self.save_tab(), which overwrites
+                t.sel and t.focus from the current (already reset) view
+                state. By the time restore_view(t.sel, t.focus) runs, the
+                locals it reads from `t` have been clobbered.
+     Fix idea:  Snapshot t.sel / t.focus into locals before calling
+                navigate(), or add a save=False flag to navigate() and pass
+                it here, then restore.
+     Trigger:   Every tab switch with more than one row visible.
+     Found by:  review
+
+[2] Old-pin migration deletes the source without ever writing the destination
+     File:      config.py, load_config()
+     Symptom:   First launch after the legacy ~/.keyfm_pins.json migration:
+                pins appear correct in memory, but if the user quits without
+                triggering save_config (theme toggle, pin change, key rebind,
+                "always use this app"), the next launch shows no pins and
+                the old file is gone. Data loss.
+     Cause:     os.unlink(OLD_PIN_FILE) runs immediately after loading, but
+                CONFIG_FILE is never written during migration.
+     Fix idea:  Call save_config(cfg) at the end of load_config() whenever
+                the legacy file was consumed, BEFORE unlinking it (or unlink
+                only after a successful save_config).
+     Trigger:   User upgrades from the pre-1.3 pin format.
+     Found by:  review
+
+[3] open_terminal() breaks on paths containing a single quote
+     File:      ui.py, FileManager.open_terminal()
+     Symptom:   "Open PowerShell here" / "Open Terminal here" fails on
+                paths like C:\Users\O'Brien\… (Windows) or /home/o'brien/…
+                (POSIX).
+     Cause:     The path is embedded as f"cd '{path}'" with no escaping of
+                the embedded quote.
+     Fix idea:  Windows: use double quotes (cd \"{path}\") or call
+                $PSScriptRoot-free `& { Set-Location -LiteralPath "<path>" }`.
+                POSIX: escape ' as '\'' or pass the path via "$1" to a
+                shell -c wrapper.
+     Trigger:   Any path with an apostrophe.
+     Found by:  review
+
+[5] Shift+F10 opens the context menu at the mouse pointer, not the focused row
+     File:      ui.py, _on_list_context() / do_context_menu()
+     Symptom:   Pressing Shift+F10 (or the "Right-click menu" action) pops
+                the context menu wherever the mouse happens to be, not at the
+                current item.
+     Cause:     do_context_menu() computes a sensible vp_pos and passes it to
+                _on_list_context(vp_pos), but _on_list_context ignores its
+                argument and uses QCursor.pos() instead.
+     Fix idea:  Use the passed pos argument. Only fall back to QCursor.pos()
+                in the mouse-triggered path (i.e. pass None from do_context_menu
+                vs a real point from customContextMenuRequested).
+     Trigger:   Keyboard-invoked context menu with the pointer somewhere else.
+     Found by:  review
+
+[6] closeEvent() may terminate a QThread that is still running
+     File:      ui.py, FileManager.closeEvent() / _AppLoaderThread
+     Symptom:   On Windows, if the user closes the main window while the
+                Open-With app discovery thread is still inside its 10-second
+                PowerShell call, wait(3000) returns False and Qt aborts the
+                process when the QThread is destroyed.
+     Cause:     _APP_LOADERS threads are waited on for only 3 s, but
+                list_apps() can block for up to 10 s in subprocess.run's
+                timeout.
+     Fix idea:  Give _AppLoaderThread an interruption check (requestInterruption
+                in closeEvent, isInterruptionRequested between PS call and
+                registry scan) and bump wait() to 15000 as a safety net.
+     Trigger:   Close the window during the first ~10 s after opening the
+                Open-With dialog on a Windows machine.
+     Found by:  review
+
+[7] A corrupt CONFIG_FILE is silently discarded
+     File:      config.py, load_config()
+     Symptom:   If ~/.keyfm.json exists but is truncated or unparsable, the
+                whole file is discarded, defaults are used, and the next
+                save_config() overwrites it — pins, associations and key
+                rebinds lost with no warning and no backup.
+     Cause:     json.JSONDecodeError / UnicodeDecodeError fall through to
+                the OLD_PIN_FILE branch and then to defaults; nothing is
+                preserved.
+     Fix idea:  On decode error, rename CONFIG_FILE to CONFIG_FILE + ".corrupt"
+                and continue with defaults, so the user can recover manually.
+     Trigger:   Power loss / kill -9 during json.dump (unlikely with the
+                atomic write, but possible).
+     Found by:  review
+
+[8] "Open with…" is not reachable via its own docstring-claimed menu item
+     File:      ui.py, module docstring
+     Symptom:   The module docstring advertises a native Windows shell
+                context menu ("Show Windows Context Menu") and IContextMenu
+                integration. Neither exists anywhere in the code.
+     Cause:     Docstring describes Step 7b as done, but IContextMenu was
+                never implemented and the menu item is absent from both
+                _on_list_context and _on_sidebar_context.
+     Fix idea:  Either implement IContextMenu (large) or remove the claim
+                and the "Open PowerShell here" bullet that implies it, so
+                future readers aren't misled.
+     Trigger:   Any reader trying to find the advertised feature.
+     Found by:  review
+
+🟢 GREEN — note, don't fix rn but eventually one day
+=====================================================
+[9] Windows shortcut enumeration breaks on names containing '|'
+     File:      apps.py, win_apps()
+     Symptom:   A shortcut named "A | B.lnk" produces the row "A | B|<exe>",
+                and line.partition("|") splits at the wrong pipe. The app is
+                registered under the wrong display name (or dropped if the
+                left half contains no .exe).
+     Why green: Cosmetic on normal machines; rare file names only.
+     Trigger:   Shortcut names containing '|'.
+
+[10] app_from_file() is dead code
+     File:      apps.py, app_from_file()
+     Symptom:   None — function is never imported by ui.py. The intended
+                "double-click a .bat and run it via cmd /c" behaviour isn't
+                wired anywhere; open_current() always uses default_open()
+                (os.startfile on Windows).
+     Why green: No functional impact today.
+     Trigger:   Someone wants .bat/.cmd/.ps1 files to launch through keyfm
+                instead of the OS handler.
+
+[11] open_menu_bar() doesn't open a menu
+     File:      ui.py, FileManager.open_menu_bar()
+     Symptom:   F10 "opens" the File menu (per ACTION_DEFS label) but
+                setActiveAction() only highlights the item in the bar; no
+                dropdown appears.
+     Why green: Visual/ergonomic only. F10 still focuses the menu bar, so
+                arrow keys work.
+     Trigger:   User expecting Explorer-style F10 behaviour.
+
+[12] _handle_typeahead mishandles multi-character input events
+     File:      ui.py, LassoTableView._handle_typeahead()
+     Symptom:   If event.text() returns more than one character (IME
+                composition, event synthesis), the buffer grows by all of
+                them and the "all characters identical" heuristic can pick
+                the wrong query.
+     Why green: Doesn't trigger with ordinary keyboard typing.
+     Trigger:   IME / multi-char text input event while the list has focus.
+
+[13] Unused `import time` in ui.py
+     File:      ui.py
+     Reason:    Imported but never referenced.
+
+[16] _on_sidebar_navigate's focus branch is dead code
+     File:      ui.py, FileManager._on_sidebar_navigate()
+     Symptom:   The `and self.view.hasFocus()` check is always False at that
+                point (the click just focused the sidebar), so the inner
+                setFocus() call never runs.
+     Why green: Harmless — no behaviour change either way.
+     Trigger:   Any cosmetic cleanup pass.
+
+⚫ IGNORED — not bugs / won't fix
+=====================================================
+(none)
