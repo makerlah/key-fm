@@ -107,6 +107,23 @@ impl eframe::App for KeyFmApp {
         visuals.selection.stroke.color = self.theme.fg;
         ctx.set_visuals(visuals);
 
+        // SidePanel (Sidebar)
+        egui::SidePanel::left("sidebar").show(ctx, |ui| {
+            ui.heading("Quick Access");
+            for (label, path) in drives::known_folders() {
+                if ui.button(label).clicked() {
+                    navigate_to = Some(path);
+                }
+            }
+            ui.separator();
+            ui.heading("This PC");
+            for drive in drives::scan_drives() {
+                if ui.button(&drive.name).clicked() {
+                    navigate_to = Some(drive.path.to_string_lossy().to_string());
+                }
+            }
+        });
+
         // 2. Keyboard Input Handling
         if !ctx.wants_keyboard_input() {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
