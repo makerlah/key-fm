@@ -68,7 +68,7 @@ import traceback
 from PySide6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QObject, QPoint, QRect, QRunnable,
     QThread, QThreadPool, QTimer, QItemSelection, QItemSelectionModel,
-    Signal,
+    Signal, QFileInfo,
 )
 from PySide6.QtGui import (
     QAction, QColor, QCursor, QPalette, QFont, QKeySequence, QShortcut,
@@ -79,7 +79,7 @@ from PySide6.QtWidgets import (
     QToolButton, QTreeWidget, QTreeWidgetItem, QSplitter, QMenu,
     QRubberBand, QTabBar, QDialog, QPushButton, QMessageBox,
     QInputDialog, QFormLayout, QSizePolicy, QCheckBox, QListWidget,
-    QListWidgetItem, QFileDialog, QDialogButtonBox,
+    QListWidgetItem, QFileDialog, QDialogButtonBox, QFileIconProvider,
 )
 
 from .constants import (
@@ -219,11 +219,29 @@ def _spec_from_qt(text):
 class FileListModel(QAbstractTableModel):
     """Thin table model over ``FileManager.shown``."""
 
+    _icon_provider = QFileIconProvider()
+    _icon_cache = {}
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.rows = []
         self.columns = tuple(COLS)
         self.titles = dict(TITLES)
+
+    def _icon_for(self, item):
+        if item.is_dir:
+            key = "::folder"
+        else:
+            key = (os.path.splitext(item.name)[1].lower()) or "::file"
+        cached = self._icon_cache.get(key)
+        if cached is not None:
+            return cached
+        if item.is_dir:
+            ic = self._icon_provider.icon(QFileIconProvider.Folder)
+        else:
+            ic = self._icon_provider.icon(QFileInfo(item.path))
+        self._icon_cache[key] = ic
+        return ic
 
     def set_rows(self, rows):
         if len(rows) == len(self.rows) and all(
@@ -237,6 +255,7 @@ class FileListModel(QAbstractTableModel):
         columns = tuple(columns)
         if columns == self.columns and titles == self.titles:
             return
+        self._icon_cache.clear()
         self.beginResetModel()
         self.columns = columns
         self.titles = dict(titles)
@@ -280,6 +299,10 @@ class FileListModel(QAbstractTableModel):
                 return human_size(row.size)
             if col == "modified":
                 return fmt_time(row.mtime) if row.mtime else ""
+        elif role == Qt.DecorationRole:
+            if self.columns[index.column()] == "name":
+                return self._icon_for(row)
+            return None
         elif role == Qt.TextAlignmentRole:
             if col == "size":
                 return int(Qt.AlignRight | Qt.AlignVCenter)
