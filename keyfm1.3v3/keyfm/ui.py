@@ -2003,6 +2003,15 @@ class FileManager(QMainWindow):
     def _act_shortcuts(self): self.show_shortcuts()
     def _act_menu_bar(self): self.open_menu_bar()
 
+    def _is_protected_path(self, path):
+        if not path or path in VIRTUAL:
+            return True
+        if FileListModel._is_drive_root(path):
+            return True
+        if same_loc(path, os.path.expanduser("~")):
+            return True
+        return False
+
     # --------------------------------------------------------- utilities
     def _focus_row(self, row):
         if not self.shown:
@@ -2938,6 +2947,18 @@ class FileManager(QMainWindow):
         if not items:
             self.flash("Nothing selected")
             return
+        filtered = []
+        protected_count = 0
+        for it in items:
+            if self._is_protected_path(it.path):
+                protected_count += 1
+            else:
+                filtered.append(it)
+        if protected_count > 0:
+            self.flash("Cannot move a drive or system location")
+            if not filtered:
+                return
+        items = filtered
         self.clip = [(it.path, it.is_dir) for it in items
                      if os.path.lexists(it.path)]
         if not self.clip:
@@ -3005,6 +3026,9 @@ class FileManager(QMainWindow):
             self.flash("Cannot rename here")
             return
         it = items[0]
+        if self._is_protected_path(it.path):
+            self.flash("Cannot rename a drive or system location")
+            return
         new_name, ok = QInputDialog.getText(
             self, "Rename", "New name:",
             QLineEdit.Normal, it.name)
@@ -3030,10 +3054,25 @@ class FileManager(QMainWindow):
         self._select_by_name(new_name)
 
     def do_delete(self, permanent=False):
+        if self.cwd == THIS_PC and not self._search_active:
+            self.flash("Cannot delete a drive or system location")
+            return
         items = self._selected_items()
         if not items:
             self.flash("Nothing selected")
             return
+        filtered = []
+        protected_count = 0
+        for it in items:
+            if self._is_protected_path(it.path):
+                protected_count += 1
+            else:
+                filtered.append(it)
+        if protected_count > 0:
+            self.flash("Cannot delete a drive or system location")
+            if not filtered:
+                return
+        items = filtered
         if self.cwd in VIRTUAL and not permanent:
             self.flash("Cannot delete here")
             return
