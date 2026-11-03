@@ -19,6 +19,9 @@ struct KeyFmApp {
     path_input: String,
     tabs: Vec<Tab>,
     cur_tab: usize,
+    clipboard: Vec<std::path::PathBuf>,
+    clip_mode: String,
+    active_dialog: Option<(String, String)>,
 }
 
 impl KeyFmApp {
@@ -39,6 +42,9 @@ impl KeyFmApp {
             path_input,
             tabs: vec![tab],
             cur_tab: 0,
+            clipboard: Vec::new(),
+            clip_mode: String::new(),
+            active_dialog: None,
         };
         app.refresh_dir();
         app
@@ -173,13 +179,50 @@ impl eframe::App for KeyFmApp {
                         self.close_tab();
                         ui.close_menu();
                     }
+                    if ui.button("New Folder").clicked() {
+                        self.active_dialog = Some(("NewFolder".to_string(), "".to_string()));
+                        ui.close_menu();
+                    }
+                    if ui.button("New File").clicked() {
+                        self.active_dialog = Some(("NewFile".to_string(), "".to_string()));
+                        ui.close_menu();
+                    }
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-                ui.menu_button("Edit", |ui| {});
-                ui.menu_button("View", |ui| {});
-                ui.menu_button("Go", |ui| {});
+                ui.menu_button("Edit", |ui| {
+                    if ui.button("Copy").clicked() {
+                        self.copy_or_cut("copy");
+                        ui.close_menu();
+                    }
+                    if ui.button("Cut").clicked() {
+                        self.copy_or_cut("cut");
+                        ui.close_menu();
+                    }
+                    if ui.button("Paste").clicked() {
+                        self.paste();
+                        ui.close_menu();
+                    }
+                    if ui.button("Rename").clicked() {
+                        if let Some(idx) = self.selected_item {
+                            if let Some(item) = self.entries.get(idx) {
+                                self.active_dialog = Some(("Rename".to_string(), item.name.clone()));
+                            }
+                        }
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete (Recycle)").clicked() {
+                        self.delete_selected(false);
+                        ui.close_menu();
+                    }
+                    if ui.button("Delete Permanently").clicked() {
+                        self.delete_selected(true);
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("View", |_ui| {});
+                ui.menu_button("Go", |_ui| {});
             });
         });
 
@@ -338,6 +381,56 @@ impl eframe::App for KeyFmApp {
                     });
             });
         });
+
+        // Dialog rendering
+        if let Some((action, ref mut input_val)) = self.active_dialog {
+            let mut close_dialog = false;
+            let mut confirm = false;
+            egui::Window::new(&action)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Enter name for {}:", action));
+                    let resp = ui.text_edit_singleline(input_val);
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        confirm = true;
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_dialog = true;
+                        }
+                    });
+                });
+
+            if confirm {
+                let current_cwd = self.cwd.clone();
+                let target_path = Path::new(&current_cwd);
+                if action == "NewFolder" {
+                    let _ = std::fs::create_dir(target_path.join(input_val));
+                    self.refresh_dir();
+                } else if action == "NewFile" {
+                    let _ = std::fs::File::create(target_path.join(input_val));
+                    self.refresh_dir();
+                } else if action == "Rename" {
+                    if let Some(idx) = self.selected_item {
+                        if let Some(item) = self.entries.get(idx) {
+                            let old_path = item.path.clone();
+                            let new_path = target_path.join(input_val);
+                            let _ = std::fs::rename(old_path, new_path);
+                            self.refresh_dir();
+                        }
+                    }
+                }
+                close_dialog = true;
+            }
+
+            if close_dialog {
+                self.active_dialog = None;
+            }
+        }
 
         // 6. Apply Navigation (Must be at the very end!)
         if let Some(new_path) = navigate_to {
