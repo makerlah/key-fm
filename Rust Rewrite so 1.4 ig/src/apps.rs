@@ -32,21 +32,30 @@ pub fn launch_with(exe: &str, path: &Path) {
     let _ = cmd.spawn();
 }
 
-pub fn default_open(path: &Path) {
+pub fn default_open(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         let path_str = path.to_string_lossy();
-        let _ = Command::new("cmd")
+        Command::new("cmd")
             .args(["/C", "start", "", &path_str])
             .creation_flags(0x08000000)
-            .spawn();
+            .spawn()
+            .map(|_| ())
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open").arg(path).spawn();
+        Command::new("open").arg(path).spawn().map(|_| ())
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("xdg-open").arg(path).spawn();
+        Command::new("xdg-open").arg(path).spawn().map(|_| ())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "no default opener available",
+        ))
     }
 }

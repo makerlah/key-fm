@@ -9,6 +9,15 @@ use keyfm::drives;
 use keyfm::helpers::{human_size, fmt_time};
 use std::path::Path;
 
+/// Version-independent rectangle border (avoids egui's changing
+/// `rect_stroke` signature across versions).
+fn stroke_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
+    painter.line_segment([rect.left_top(), rect.right_top()], stroke);
+    painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
+    painter.line_segment([rect.right_bottom(), rect.left_bottom()], stroke);
+    painter.line_segment([rect.left_bottom(), rect.left_top()], stroke);
+}
+
 /// Actions queued from inside table row / context-menu closures.
 ///
 /// They are collected in `update()` and executed *after* the table is
@@ -23,26 +32,16 @@ enum UiAction {
     Delete,
     TogglePin(std::path::PathBuf),
     Open(std::path::PathBuf),
+    OpenWith(std::path::PathBuf),
+    SidebarPin(std::path::PathBuf),
+    SidebarUnpin(std::path::PathBuf),
+    EmptySpace,
+    EmptyBin,
+    NewFolder,
+    NewFile,
+    Refresh,
 }
 
-/// Launch a path with the OS default handler.
-fn open_with_default_app(path: &Path) {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(path).spawn();
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-    }
-}
 
 struct KeyFmApp {
     config: Config,
@@ -57,6 +56,9 @@ struct KeyFmApp {
     clipboard: Vec<std::path::PathBuf>,
     clip_mode: String,
     active_dialog: Option<(String, String)>,
+    lasso_start: Option<egui::Pos2>,
+    selected_items: Vec<usize>,
+    status_msg: String,
 }
 
 impl KeyFmApp {
@@ -80,6 +82,9 @@ impl KeyFmApp {
             clipboard: Vec::new(),
             clip_mode: "copy".to_string(),
             active_dialog: None,
+            lasso_start: None,
+            selected_items: Vec::new(),
+            status_msg: String::new(),
         };
         app.refresh_dir();
         app
@@ -171,17 +176,28 @@ impl KeyFmApp {
         self.refresh_dir();
     }
 
-    fn delete_selected(&mut self, _permanent: bool) {
+    fn delete_selected(&mut self, permanent: bool) {
+        let mut error_msg: Option<String> = None;
         if let Some(idx) = self.selected_item {
             if let Some(item) = self.entries.get(idx) {
                 let path = item.path.clone();
-                if path.is_dir() {
-                    let _ = std::fs::remove_dir_all(&path);
-                } else {
-                    let _ = std::fs::remove_file(&path);
+                if permanent {
+                    let res = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    if let Err(e) = res {
+                        error_msg = Some(format!("Delete failed: {}", e));
+                    }
+                } else if let Err(e) = keyfm::trash::move_to_trash(&path) {
+                    error_msg = Some(format!("Trash failed: {}", e));
                 }
-                self.selected_item = None; 
+                self.selected_item = None;
             }
+        }
+        if let Some(msg) = error_msg {
+            self.status_msg = msg;
         }
         self.refresh_dir();
     }
@@ -235,6 +251,7 @@ impl KeyFmApp {
         });
         self.path_input = self.cwd.clone();
         self.selected_item = None;
+        self.selected_items.clear();
     }
 }
 
@@ -282,6 +299,11 @@ impl eframe::App for KeyFmApp {
                     }
                     if ui.button("New File").clicked() {
                         self.active_dialog = Some(("NewFile".to_string(), "".to_string()));
+                        ui.close_menu();
+                    }
+                    if ui.button("Empty Recycle Bin").clicked() {
+                        let _ = keyfm::trash::win_empty_recycle_bin();
+                        self.refresh_dir();
                         ui.close_menu();
                     }
                     if ui.button("Quit").clicked() {
@@ -360,17 +382,45 @@ impl eframe::App for KeyFmApp {
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| pin.clone());
-                    if ui.button(format!("📌 {}", label)).clicked() {
+                    let pin_path = std::path::PathBuf::from(pin);
+                    let resp = ui.button(format!("📌 {}", label));
+                    if resp.clicked() {
                         navigate_to = Some(pin.clone());
                     }
+                    resp.context_menu(|ui| {
+                        if ui.button("Open").clicked() {
+                            navigate_to = Some(pin_path.to_string_lossy().to_string());
+                            ui.close_menu();
+                        }
+                        if ui.button("Unpin").clicked() {
+                            pending_action = UiAction::SidebarUnpin(pin_path.clone());
+                            ui.close_menu();
+                        }
+                    });
                 }
                 ui.separator();
             }
             for (label, path) in drives::known_folders() {
-                if ui.button(label).clicked() {
-                    // Convert PathBuf to String
-                    navigate_to = Some(path.to_string_lossy().to_string());
+                let path_str = path.to_string_lossy().to_string();
+                let resp = ui.button(label);
+                if resp.clicked() {
+                    navigate_to = Some(path_str.clone());
                 }
+                resp.context_menu(|ui| {
+                    if ui.button("Open").clicked() {
+                        navigate_to = Some(path_str.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("Pin").clicked() {
+                        pending_action = UiAction::SidebarPin(std::path::PathBuf::from(&path_str));
+                        ui.close_menu();
+                    }
+                    if ui.button("Unpin").clicked() {
+                        pending_action =
+                            UiAction::SidebarUnpin(std::path::PathBuf::from(&path_str));
+                        ui.close_menu();
+                    }
+                });
             }
             ui.separator(); 
             ui.heading("This PC");
@@ -414,6 +464,25 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
                 self.refresh_dir();
             }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) {
+                self.copy_or_cut("copy");
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::X)) {
+                self.copy_or_cut("cut");
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V)) {
+                self.paste();
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+                self.delete_selected(false);
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+                if let Some(idx) = self.selected_item {
+                    if let Some(item) = self.entries.get(idx) {
+                        self.active_dialog = Some(("Rename".to_string(), item.name.clone()));
+                    }
+                }
+            }
         }
 
         // 3. Top Toolbar
@@ -446,11 +515,61 @@ impl eframe::App for KeyFmApp {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(format!("{} items", self.entries.len()));
+                if !self.status_msg.is_empty() {
+                    ui.separator();
+                    ui.label(&self.status_msg);
+                }
             });
         });
 
         // 5. Central Panel (File List)
         egui::CentralPanel::default().show(ctx, |ui| {
+            // ---- lasso state ----
+            let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+            let primary_down = ui.input(|i| i.pointer.primary_down());
+            if ui.input(|i| i.pointer.primary_pressed()) {
+                self.lasso_start = pointer_pos;
+                self.selected_items.clear();
+            }
+            let lasso_rect: Option<egui::Rect> = if primary_down {
+                match (self.lasso_start, pointer_pos) {
+                    (Some(start), Some(cur)) if start.distance(cur) > 4.0 => {
+                        Some(egui::Rect::from_two_pos(start, cur))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // ---- empty space (behind the rows) ----
+            let empty_response = ui.interact(
+                ui.available_rect_before_wrap(),
+                ui.id().with("empty_space"),
+                egui::Sense::click(),
+            );
+            if empty_response.clicked() {
+                pending_action = UiAction::EmptySpace;
+            }
+            empty_response.context_menu(|ui| {
+                if ui.button("New Folder").clicked() {
+                    pending_action = UiAction::NewFolder;
+                    ui.close_menu();
+                }
+                if ui.button("New File").clicked() {
+                    pending_action = UiAction::NewFile;
+                    ui.close_menu();
+                }
+                if ui.button("Paste").clicked() {
+                    pending_action = UiAction::Paste;
+                    ui.close_menu();
+                }
+                if ui.button("Refresh").clicked() {
+                    pending_action = UiAction::Refresh;
+                    ui.close_menu();
+                }
+            });
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let filter = self.filter.to_lowercase();
                 egui_extras::TableBuilder::new(ui)
@@ -479,6 +598,7 @@ impl eframe::App for KeyFmApp {
                             };
                             let time_str = fmt_time(item.mtime);
                             let is_selected = self.selected_item == Some(idx);
+                            let is_multi_selected = self.selected_items.contains(&idx);
                             let is_dir = item.is_dir;
                             let item_path = item.path.clone();
                             let item_name = item.name.clone();
@@ -494,12 +614,28 @@ impl eframe::App for KeyFmApp {
                                         egui::Sense::click(),
                                     );
 
+                                    // Lasso: select every row the drag rectangle touches.
+                                    if let Some(lr) = lasso_rect {
+                                        if lr.intersects(response.rect) {
+                                            if !self.selected_items.contains(&idx) {
+                                                self.selected_items.push(idx);
+                                            }
+                                            self.selected_item = Some(idx);
+                                        }
+                                    }
+
                                     // Paint the selection highlight *before* the text.
-                                    if is_selected {
+                                    if is_selected || is_multi_selected {
                                         ui.painter().rect_filled(
                                             response.rect,
                                             0.0,
                                             self.theme.sel_bg,
+                                        );
+                                    } else if response.hovered() {
+                                        stroke_rect(
+                                            ui.painter(),
+                                            response.rect,
+                                            egui::Stroke::new(1.0, self.theme.accent),
                                         );
                                     }
 
@@ -521,6 +657,10 @@ impl eframe::App for KeyFmApp {
                                     response.context_menu(|ui| {
                                         if ui.button("Open").clicked() {
                                             pending_action = UiAction::Open(item_path.clone());
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Open With (default app)").clicked() {
+                                            pending_action = UiAction::OpenWith(item_path.clone());
                                             ui.close_menu();
                                         }
                                         ui.separator();
@@ -565,7 +705,7 @@ impl eframe::App for KeyFmApp {
 
                                 // ---- column 2: size ----
                                 row.col(|ui| {
-                                    if is_selected {
+                                    if is_selected || is_multi_selected {
                                         ui.painter().rect_filled(
                                             ui.max_rect(),
                                             0.0,
@@ -577,7 +717,7 @@ impl eframe::App for KeyFmApp {
 
                                 // ---- column 3: modified time ----
                                 row.col(|ui| {
-                                    if is_selected {
+                                    if is_selected || is_multi_selected {
                                         ui.painter().rect_filled(
                                             ui.max_rect(),
                                             0.0,
@@ -590,6 +730,18 @@ impl eframe::App for KeyFmApp {
                         }
                     });
             });
+
+            // Draw the lasso rectangle on top of the rows.
+            if let Some(lr) = lasso_rect {
+                stroke_rect(
+                    ui.painter(),
+                    lr,
+                    egui::Stroke::new(1.0, self.theme.accent),
+                );
+            }
+            if ui.input(|i| i.pointer.primary_released()) {
+                self.lasso_start = None;
+            }
         });
 
         // Execute anything the row / context-menu closures queued up. Done
@@ -607,13 +759,37 @@ impl eframe::App for KeyFmApp {
                 let p = path.to_string_lossy().to_string();
                 self.toggle_pin(&p);
             }
-            UiAction::Open(path) => {
+            UiAction::SidebarPin(path) => {
+                let p = path.to_string_lossy().to_string();
+                self.toggle_pin(&p);
+            }
+            UiAction::SidebarUnpin(path) => {
+                let p = path.to_string_lossy().to_string();
+                self.config.pins.retain(|x| x != &p);
+                let _ = keyfm::config::save_config(&self.config);
+            }
+            UiAction::Open(path) | UiAction::OpenWith(path) => {
                 if path.is_dir() {
                     navigate_to = Some(path.to_string_lossy().to_string());
-                } else {
-                    open_with_default_app(&path);
+                } else if let Err(e) = keyfm::apps::default_open(&path) {
+                    self.status_msg = format!("Open failed: {}", e);
                 }
             }
+            UiAction::EmptySpace => {
+                self.selected_item = None;
+                self.selected_items.clear();
+            }
+            UiAction::EmptyBin => {
+                let _ = keyfm::trash::win_empty_recycle_bin();
+                self.refresh_dir();
+            }
+            UiAction::NewFolder => {
+                self.active_dialog = Some(("NewFolder".to_string(), String::new()));
+            }
+            UiAction::NewFile => {
+                self.active_dialog = Some(("NewFile".to_string(), String::new()));
+            }
+            UiAction::Refresh => self.refresh_dir(),
         }
 
         // Dialog rendering (take() so we never hold a borrow of self while
