@@ -108,15 +108,16 @@ from .apps import default_open, launch_with, list_apps
 
 
 # Default widths (px) used by the file list.
-COL_WIDTHS = {"name": 460, "where": 260, "size": 100, "modified": 160}
+COL_WIDTHS = {"name": 460, "modified": 160, "type": 160,
+              "size": 100, "where": 260}
 
 # Column-name -> alignment. Only "size" is right-aligned.
 COL_ALIGN = {"size": Qt.AlignRight | Qt.AlignVCenter}
 
 # Search results carry the containing folder in Item.orig, so the "where"
 # column is meaningful (and visible) while a system-wide search is running.
-SEARCH_TITLES = {"name": "Name", "where": "Folder", "size": "Size",
-                 "modified": "Modified"}
+SEARCH_TITLES = {"name": "Name", "modified": "Date modified",
+                 "type": "Type", "size": "Size", "where": "Folder"}
 
 # Drive-usage "extra" text from scan_drives is shaped like
 #   "12.3 GB used of 100.0 GB (12.3%)"
@@ -325,6 +326,13 @@ class FileListModel(QAbstractTableModel):
                 return human_size(row.size)
             if col == "modified":
                 return fmt_time(row.mtime) if row.mtime else ""
+            if col == "type":
+                if row.is_dir:
+                    return "File folder"
+                ext = os.path.splitext(row.name)[1].lower()
+                if not ext:
+                    return "File"
+                return TYPE_LABELS.get(ext, ext[1:].upper() + " File")
         elif role == Qt.DecorationRole:
             if self.columns[index.column()] == "name":
                 return self._icon_for(row)
@@ -2442,6 +2450,9 @@ class FileManager(QMainWindow):
                 val = it.size
             elif col == "modified":
                 val = it.mtime or 0
+            elif col == "type":
+                val = ("0folder" if it.is_dir
+                       else "1" + os.path.splitext(it.name)[1].lower())
             elif col == "where":
                 val = (it.orig or "").lower()
             else:

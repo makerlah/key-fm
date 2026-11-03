@@ -10,13 +10,15 @@ THIS_PC = "::this-pc::"
 RECYCLE = "::recycle-bin::"
 VIRTUAL = (THIS_PC, RECYCLE)
 
-COLS = ("name", "where", "size", "modified")
-TITLES = {"name": "Name", "where": "Original location", "size": "Size",
-          "modified": "Modified"}
+COLS = ("name", "modified", "type", "size", "where")
+TITLES = {"name": "Name", "modified": "Date modified",
+          "type": "Type", "size": "Size", "where": None}
 # #28: None = hide the column; "" = visible but blank header
-PC_TITLES = {"name": "Name", "where": None, "size": "Free space", "modified": ""}
-BIN_TITLES = {"name": "Name", "where": "Original location", "size": "Size",
-              "modified": "Date deleted"}
+PC_TITLES = {"name": "Name", "modified": "", "type": None,
+             "size": "Free space", "where": None}
+BIN_TITLES = {"name": "Name", "modified": "Date deleted",
+              "type": "Type", "size": "Size",
+              "where": "Original location"}
 
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".keyfm.json")
 OLD_PIN_FILE = os.path.join(os.path.expanduser("~"), ".keyfm_pins.json")
