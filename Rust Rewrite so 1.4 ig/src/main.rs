@@ -1,13 +1,13 @@
 use eframe::egui;
 use std::env;
-use keyfm::config::{load_config, save_config, Config};
+use keyfm::config::{load_config, Config};
 use keyfm::theme::{LIGHT, DARK, Theme};
 use keyfm::helpers::get_start_dir;
 
 use keyfm::models::Item;
 use keyfm::drives;
 use keyfm::helpers::{human_size, fmt_time, get_start_dir};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 struct KeyFmApp {
     config: Config,
