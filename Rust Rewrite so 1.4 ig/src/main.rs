@@ -169,6 +169,7 @@ impl eframe::App for KeyFmApp {
                         header.col(|ui| { ui.strong("Modified"); });
                     })
                     .body(|mut body| {
+                        let mut next_dir: Option<String> = None;
                         for (idx, item) in self.entries.iter().enumerate() {
                             if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
                                 continue;
@@ -185,8 +186,7 @@ impl eframe::App for KeyFmApp {
                                     }
                                     if resp.double_clicked() {
                                         if item.is_dir {
-                                            self.cwd = item.path.to_string_lossy().to_string();
-                                            self.refresh_dir();
+                                            next_dir = Some(item.path.to_string_lossy().to_string());
                                         }
                                     }
                                 });
@@ -202,8 +202,7 @@ impl eframe::App for KeyFmApp {
             });
         });
     }
-}
-
+    
 fn main() -> Result<(), eframe::Error> {
     let args: Vec<String> = env::args().collect();
     for arg in &args {
