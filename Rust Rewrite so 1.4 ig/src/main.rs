@@ -570,9 +570,10 @@ impl eframe::App for KeyFmApp {
                 }
             });
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 let filter = self.filter.to_lowercase();
                 egui_extras::TableBuilder::new(ui)
+                    .vscroll(false)
                     .column(egui_extras::Column::remainder())
                     .column(egui_extras::Column::exact(100.0))
                     .column(egui_extras::Column::exact(150.0))
@@ -729,6 +730,39 @@ impl eframe::App for KeyFmApp {
                             });
                         }
                     });
+
+                // ---- blank space below the rows: context menu + click-to-deselect ----
+                // Fill whatever is left of the visible viewport under the table.
+                let remaining_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
+                if remaining_height > 0.0 {
+                    let remaining_rect = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(ui.available_width(), remaining_height),
+                    );
+                    let response = ui.allocate_rect(remaining_rect, egui::Sense::click());
+                    response.context_menu(|ui| {
+                        if ui.button("New Folder").clicked() {
+                            pending_action = UiAction::NewFolder;
+                            ui.close_menu();
+                        }
+                        if ui.button("New File").clicked() {
+                            pending_action = UiAction::NewFile;
+                            ui.close_menu();
+                        }
+                        if ui.button("Paste").clicked() {
+                            pending_action = UiAction::Paste;
+                            ui.close_menu();
+                        }
+                        if ui.button("Refresh").clicked() {
+                            pending_action = UiAction::Refresh;
+                            ui.close_menu();
+                        }
+                    });
+                    // Also clear selection if they click empty space
+                    if response.clicked() {
+                        self.selected_item = None;
+                    }
+                }
             });
 
             // Draw the lasso rectangle on top of the rows.
