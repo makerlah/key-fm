@@ -6,7 +6,7 @@ use keyfm::helpers::get_start_dir;
 
 use keyfm::models::Item;
 use keyfm::drives;
-use keyfm::helpers::{human_size, fmt_time, get_start_dir};
+use keyfm::helpers::{human_size, fmt_time};
 use std::path::Path;
 
 struct KeyFmApp {
@@ -94,13 +94,13 @@ impl eframe::App for KeyFmApp {
         visuals.override_text_color = Some(self.theme.fg);
         visuals.widgets.noninteractive.bg_fill = self.theme.bg;
         visuals.widgets.noninteractive.fg_stroke.color = self.theme.fg;
-        visuals.widgets.inactive.bg_fill = self.theme.surface;
+        visuals.widgets.inactive.bg_fill = self.theme.field;
         visuals.widgets.inactive.fg_stroke.color = self.theme.fg;
-        visuals.widgets.hovered.bg_fill = self.theme.selection;
+        visuals.widgets.hovered.bg_fill = self.theme.sel_bg;
         visuals.widgets.hovered.fg_stroke.color = self.theme.fg;
-        visuals.widgets.active.bg_fill = self.theme.selection;
+        visuals.widgets.active.bg_fill = self.theme.sel_bg;
         visuals.widgets.active.fg_stroke.color = self.theme.fg;
-        visuals.selection.bg_fill = self.theme.selection;
+        visuals.selection.bg_fill = self.theme.sel_bg;
         visuals.selection.stroke.color = self.theme.fg;
         ctx.set_visuals(visuals);
 
@@ -122,13 +122,13 @@ impl eframe::App for KeyFmApp {
                     }
                 }
                 ui.label("Path:");
-                let resp = ui.text_editing_singleline(&mut self.path_input);
+                let resp = ui.text_edit_singleline(&mut self.path_input);
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     self.cwd = self.path_input.clone();
                     self.refresh_dir();
                 }
                 ui.label("Filter:");
-                ui.text_editing_singleline(&mut self.filter);
+                ui.text_edit_singleline(&mut self.filter);
             });
         });
 
