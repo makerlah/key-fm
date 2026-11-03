@@ -139,12 +139,27 @@ impl KeyFmApp {
         }
     }
 
+    fn targets(&self) -> Vec<usize> {
+        if !self.selected_items.is_empty() {
+            let mut t = self.selected_items.clone();
+            t.sort();
+            t.dedup();
+            t
+        } else {
+            self.selected_item.into_iter().collect()
+        }
+    }
+
     fn copy_or_cut(&mut self, mode: &str) {
-        if let Some(idx) = self.selected_item {
-            if let Some(item) = self.entries.get(idx) {
-                self.clipboard = vec![item.path.clone()];
-                self.clip_mode = mode.to_string();
+        let t = self.targets();
+        if !t.is_empty() {
+            self.clipboard.clear();
+            for idx in t {
+                if let Some(item) = self.entries.get(idx) {
+                    self.clipboard.push(item.path.clone());
+                }
             }
+            self.clip_mode = mode.to_string();
         }
     }
 
@@ -178,23 +193,29 @@ impl KeyFmApp {
 
     fn delete_selected(&mut self, permanent: bool) {
         let mut error_msg: Option<String> = None;
-        if let Some(idx) = self.selected_item {
-            if let Some(item) = self.entries.get(idx) {
-                let path = item.path.clone();
-                if permanent {
-                    let res = if path.is_dir() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
-                    if let Err(e) = res {
-                        error_msg = Some(format!("Delete failed: {}", e));
+        let t = self.targets();
+        if !t.is_empty() {
+            for idx in t {
+                if let Some(item) = self.entries.get(idx) {
+                    let path = item.path.clone();
+                    if permanent {
+                        let res = if path.is_dir() {
+                            std::fs::remove_dir_all(&path)
+                        } else {
+                            std::fs::remove_file(&path)
+                        };
+                        if let Err(e) = res {
+                            error_msg = Some(format!("Delete failed: {}", e));
+                            break;
+                        }
+                    } else if let Err(e) = keyfm::trash::move_to_trash(&path) {
+                        error_msg = Some(format!("Trash failed: {}", e));
+                        break;
                     }
-                } else if let Err(e) = keyfm::trash::move_to_trash(&path) {
-                    error_msg = Some(format!("Trash failed: {}", e));
                 }
-                self.selected_item = None;
             }
+            self.selected_item = None;
+            self.selected_items.clear();
         }
         if let Some(msg) = error_msg {
             self.status_msg = msg;
@@ -529,7 +550,6 @@ impl eframe::App for KeyFmApp {
             let primary_down = ui.input(|i| i.pointer.primary_down());
             if ui.input(|i| i.pointer.primary_pressed()) {
                 self.lasso_start = pointer_pos;
-                self.selected_items.clear();
             }
             let lasso_rect: Option<egui::Rect> = if primary_down {
                 match (self.lasso_start, pointer_pos) {
@@ -621,7 +641,9 @@ impl eframe::App for KeyFmApp {
                                             if !self.selected_items.contains(&idx) {
                                                 self.selected_items.push(idx);
                                             }
-                                            self.selected_item = Some(idx);
+                                            if self.selected_item.is_none() {
+                                                self.selected_item = Some(idx);
+                                            }
                                         }
                                     }
 
