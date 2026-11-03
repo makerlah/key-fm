@@ -175,6 +175,27 @@ _FROM_QKEY = {
     "Ins": "Insert", "Insert": "Insert",
 }
 
+TYPE_LABELS = {
+    ".txt": "Text Document", ".md": "Markdown Document",
+    ".py": "Python File", ".js": "JavaScript File",
+    ".json": "JSON File", ".xml": "XML File",
+    ".html": "HTML Document", ".htm": "HTML Document",
+    ".css": "Cascading Style Sheet",
+    ".png": "PNG File", ".jpg": "JPEG File",
+    ".jpeg": "JPEG File", ".gif": "GIF File",
+    ".svg": "SVG File", ".bmp": "Bitmap Image",
+    ".zip": "Compressed (zipped) Folder",
+    ".tar": "TAR File", ".gz": "GZip File",
+    ".7z": "7z File", ".rar": "RAR File",
+    ".mp3": "MP3 Audio", ".wav": "WAV Audio",
+    ".mp4": "MP4 Video", ".mkv": "MKV Video",
+    ".pdf": "PDF Document",
+    ".exe": "Application", ".lnk": "Shortcut",
+    ".bat": "Windows Batch File", ".cmd": "Command Script",
+    ".ps1": "PowerShell Script",
+    ".sh": "Shell Script", ".desktop": "Desktop Entry",
+}
+
 
 def _to_qsequence(spec):
     if not spec:
