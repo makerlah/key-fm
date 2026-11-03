@@ -1183,7 +1183,7 @@ class Sidebar(QTreeWidget):
         super().__init__(parent)
         self.setObjectName("Sidebar")
         self.setHeaderHidden(True)
-        self.setIndentation(10)
+        self.setIndentation(18)
         self.setRootIsDecorated(False)
         self.setExpandsOnDoubleClick(False)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -1235,15 +1235,14 @@ class Sidebar(QTreeWidget):
         super().keyPressEvent(event)
 
     def make_section(self, text, dim_color, clickable=False, path=None):
-        item = QTreeWidgetItem([text.upper()])
+        item = QTreeWidgetItem([text])
         if clickable:
             item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
         else:
             item.setFlags(Qt.ItemIsEnabled)
         f = item.font(0)
         f.setBold(True)
-        f.setPointSize(max(f.pointSize() - 1, 7))
-        f.setLetterSpacing(QFont.AbsoluteSpacing, 1.0)
+        f.setPointSize(max(f.pointSize() - 1, 8))
         item.setFont(0, f)
         item.setForeground(0, QColor(dim_color))
         if path is not None:
@@ -1605,17 +1604,17 @@ class FileManager(QMainWindow):
             QTreeWidget#Sidebar {{
                 background: {P['side']};
                 color: {P['fg']};
-                border: 1px solid {P['border']};
-                border-radius: 6px;
+                border: none;
+                border-right: 1px solid {P['border']};
                 outline: none;
-                padding: 4px;
+                padding: 8px 4px;
                 show-decoration-selected: 1;
             }}
             QTreeWidget#Sidebar::item {{
                 background-color: transparent;
-                padding: 6px 8px;
-                border-radius: 4px;
-                margin: 1px 2px;
+                padding: 5px 8px;
+                border-radius: 2px;
+                margin: 0px 2px;
             }}
             QTreeWidget#Sidebar::item:hover {{
                 background-color: {P['hover']};
@@ -1623,6 +1622,9 @@ class FileManager(QMainWindow):
             QTreeWidget#Sidebar::item:selected {{
                 background-color: {P['sel_bg']};
                 color: {P['sel_fg']};
+            }}
+            QTreeWidget#Sidebar::branch {{
+                background: transparent;
             }}
             QSplitter::handle {{
                 background: {P['bg']};
@@ -3421,7 +3423,7 @@ class FileManager(QMainWindow):
 
     def _add_quick_access(self):
         sb = self.sidebar
-        header = sb.make_section("QUICK ACCESS", self.palette["dim"])
+        header = sb.make_section("Quick access", self.palette["dim"])
 
         seen = []
 
@@ -3447,7 +3449,7 @@ class FileManager(QMainWindow):
 
     def _add_this_pc(self):
         sb = self.sidebar
-        header = sb.make_section("THIS PC", self.palette["dim"],
+        header = sb.make_section("This PC", self.palette["dim"],
                                  clickable=True, path=THIS_PC)
 
         drives = scan_drives(quick=True)
