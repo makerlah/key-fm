@@ -78,17 +78,12 @@ impl KeyFmApp {
             }
         });
         self.path_input = self.cwd.clone();
+        self.selected_item = None;
     }
 }
 
 impl eframe::App for KeyFmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::D)) {
-            self.config.dark = !self.config.dark;
-            self.theme = if self.config.dark { DARK } else { LIGHT };
-            save_config(&self.config);
-        }
-
         let mut visuals = if self.config.dark {
             egui::Visuals::dark()
         } else {
@@ -97,6 +92,16 @@ impl eframe::App for KeyFmApp {
         visuals.window_fill = self.theme.bg;
         visuals.panel_fill = self.theme.bg;
         visuals.override_text_color = Some(self.theme.fg);
+        visuals.widgets.noninteractive.bg_fill = self.theme.bg;
+        visuals.widgets.noninteractive.fg_stroke.color = self.theme.fg;
+        visuals.widgets.inactive.bg_fill = self.theme.surface;
+        visuals.widgets.inactive.fg_stroke.color = self.theme.fg;
+        visuals.widgets.hovered.bg_fill = self.theme.selection;
+        visuals.widgets.hovered.fg_stroke.color = self.theme.fg;
+        visuals.widgets.active.bg_fill = self.theme.selection;
+        visuals.widgets.active.fg_stroke.color = self.theme.fg;
+        visuals.selection.bg_fill = self.theme.selection;
+        visuals.selection.stroke.color = self.theme.fg;
         ctx.set_visuals(visuals);
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -106,6 +111,9 @@ impl eframe::App for KeyFmApp {
                         self.cwd = parent.to_string_lossy().to_string();
                         self.refresh_dir();
                     }
+                }
+                if ui.button("Forward").clicked() {
+                    // Forward navigation placeholder
                 }
                 if ui.button("Up").clicked() {
                     if let Some(parent) = Path::new(&self.cwd).parent() {
@@ -151,28 +159,46 @@ impl eframe::App for KeyFmApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let filter = self.filter.to_lowercase();
-                for (idx, item) in self.entries.iter().enumerate() {
-                    if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
-                        continue;
-                    }
-                    let name_str = if item.is_dir { format!("{}/", item.name) } else { item.name.clone() };
-                    let size_str = if item.is_dir { "".to_string() } else { human_size(item.size) };
-                    let time_str = fmt_time(item.mtime);
+                egui_extras::TableBuilder::new(ui)
+                    .column(egui_extras::Column::remainder())
+                    .column(egui_extras::Column::exact(100.0))
+                    .column(egui_extras::Column::exact(150.0))
+                    .header(20.0, |mut header| {
+                        header.col(|ui| { ui.strong("Name"); });
+                        header.col(|ui| { ui.strong("Size"); });
+                        header.col(|ui| { ui.strong("Modified"); });
+                    })
+                    .body(|mut body| {
+                        for (idx, item) in self.entries.iter().enumerate() {
+                            if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
+                                continue;
+                            }
+                            let name_str = if item.is_dir { format!("{}/", item.name) } else { item.name.clone() };
+                            let size_str = if item.is_dir { "".to_string() } else { human_size(item.size) };
+                            let time_str = fmt_time(item.mtime);
 
-                    let row_text = format!("{:<35}  {:>10}  {}", name_str, size_str, time_str);
-                    let resp = ui.selectable_label(self.selected_item == Some(idx), row_text);
-                    if resp.clicked() {
-                        self.selected_item = Some(idx);
-                    }
-                    if resp.double_clicked() {
-                        if item.is_dir {
-                            self.cwd = item.path.to_string_lossy().to_string();
-                            self.refresh_dir();
-                            self.selected_item = None;
-                            break;
+                            body.row(18.0, |mut row| {
+                                row.col(|ui| {
+                                    let resp = ui.selectable_label(self.selected_item == Some(idx), name_str);
+                                    if resp.clicked() {
+                                        self.selected_item = Some(idx);
+                                    }
+                                    if resp.double_clicked() {
+                                        if item.is_dir {
+                                            self.cwd = item.path.to_string_lossy().to_string();
+                                            self.refresh_dir();
+                                        }
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.label(size_str);
+                                });
+                                row.col(|ui| {
+                                    ui.label(time_str);
+                                });
+                            });
                         }
-                    }
-                }
+                    });
             });
         });
     }
