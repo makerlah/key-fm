@@ -201,6 +201,11 @@ impl eframe::App for KeyFmApp {
                     });
             });
         });
+
+        if let Some(new_dir) = next_dir {
+            self.cwd = new_dir;
+            self.refresh_dir();
+        }
     }
     
 fn main() -> Result<(), eframe::Error> {
