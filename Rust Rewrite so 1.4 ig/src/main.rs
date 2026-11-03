@@ -43,7 +43,7 @@ impl KeyFmApp {
             tabs: vec![tab],
             cur_tab: 0,
             clipboard: Vec::new(),
-            clip_mode: String::new(),
+            clip_mode: "copy".to_string(),
             active_dialog: None,
         };
         app.refresh_dir();
@@ -97,6 +97,51 @@ impl KeyFmApp {
             let idx = self.cur_tab;
             self.load_tab(idx);
         }
+    }
+
+    fn copy_or_cut(&mut self, mode: &str) {
+        if let Some(idx) = self.selected_item {
+            if let Some(item) = self.entries.get(idx) {
+                self.clipboard = vec![item.path.clone()];
+                self.clip_mode = mode.to_string();
+            }
+        }
+    }
+
+    fn paste(&mut self) {
+        if self.clipboard.is_empty() { return; }
+        let dest_dir = std::path::PathBuf::from(&self.cwd);
+        
+        for src in &self.clipboard {
+            if let Some(file_name) = src.file_name() {
+                let dest = dest_dir.join(file_name);
+                if self.clip_mode == "copy" {
+                    let _ = std::fs::copy(src, &dest); 
+                } else {
+                    let _ = std::fs::rename(src, &dest);
+                }
+            }
+        }
+        
+        if self.clip_mode == "cut" {
+            self.clipboard.clear();
+        }
+        self.refresh_dir();
+    }
+
+    fn delete_selected(&mut self, permanent: bool) {
+        if let Some(idx) = self.selected_item {
+            if let Some(item) = self.entries.get(idx) {
+                let path = item.path.clone();
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+                self.selected_item = None; 
+            }
+        }
+        self.refresh_dir();
     }
 
     fn refresh_dir(&mut self) {
