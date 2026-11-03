@@ -28,7 +28,7 @@ impl KeyFmApp {
         let start_dir = get_start_dir(start);
         let cwd = start_dir.to_string_lossy().to_string();
         let path_input = cwd.clone();
-        let mut tab = Tab::new(Some(start_dir.clone()));
+        let tab = Tab::new(Some(start_dir.clone()));
         let mut app = Self {
             config,
             theme,
@@ -55,14 +55,20 @@ impl KeyFmApp {
     fn load_tab(&mut self, index: usize) {
         self.save_current_tab();
         if index < self.tabs.len() {
-            self.cur_tab = index;
-            let tab = &self.tabs[self.cur_tab];
-            if let Some(ref cwd) = tab.cwd {
+            let tab = &self.tabs[index];
+            let new_cwd = tab.cwd.clone();
+            let new_filter = tab.filter.clone();
+            let new_focus = tab.focus.clone();
+
+            if let Some(cwd) = new_cwd {
                 self.cwd = cwd.to_string_lossy().to_string();
             }
-            self.filter = tab.filter.clone();
+            self.filter = new_filter;
+            self.cur_tab = index;
+
             self.refresh_dir();
-            if let Some(ref focus) = tab.focus {
+
+            if let Some(ref focus) = new_focus {
                 self.selected_item = self.entries.iter().position(|item| &item.path == focus);
             }
         }
