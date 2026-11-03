@@ -9,6 +9,41 @@ use keyfm::drives;
 use keyfm::helpers::{human_size, fmt_time};
 use std::path::Path;
 
+/// Actions queued from inside table row / context-menu closures.
+///
+/// They are collected in `update()` and executed *after* the table is
+/// rendered, so we never have to mutate `self` while `self.entries` is
+/// still borrowed by the row iterator.
+enum UiAction {
+    None,
+    Copy,
+    Cut,
+    Paste,
+    Rename(String),
+    Delete,
+    TogglePin(std::path::PathBuf),
+    Open(std::path::PathBuf),
+}
+
+/// Launch a path with the OS default handler.
+fn open_with_default_app(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(path).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+    }
+}
+
 struct KeyFmApp {
     config: Config,
     theme: Theme,
@@ -151,6 +186,15 @@ impl KeyFmApp {
         self.refresh_dir();
     }
 
+    fn toggle_pin(&mut self, path: &str) {
+        if let Some(pos) = self.config.pins.iter().position(|p| p == path) {
+            self.config.pins.remove(pos);
+        } else {
+            self.config.pins.push(path.to_string());
+        }
+        let _ = keyfm::config::save_config(&self.config);
+    }
+
     fn refresh_dir(&mut self) {
         self.entries.clear();
         let path = Path::new(&self.cwd);
@@ -197,6 +241,7 @@ impl KeyFmApp {
 impl eframe::App for KeyFmApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut navigate_to: Option<String> = None;
+        let mut pending_action = UiAction::None;
 
         // 1. Apply Theme
         let mut visuals = if self.config.dark {
@@ -309,6 +354,18 @@ impl eframe::App for KeyFmApp {
         // SidePanel (Sidebar)
                 egui::SidePanel::left("sidebar").show(ctx, |ui| {
             ui.heading("Quick Access");
+            if !self.config.pins.is_empty() {
+                for pin in &self.config.pins {
+                    let label = std::path::Path::new(pin)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| pin.clone());
+                    if ui.button(format!("📌 {}", label)).clicked() {
+                        navigate_to = Some(pin.clone());
+                    }
+                }
+                ui.separator();
+            }
             for (label, path) in drives::known_folders() {
                 if ui.button(label).clicked() {
                     // Convert PathBuf to String
@@ -410,26 +467,123 @@ impl eframe::App for KeyFmApp {
                             if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
                                 continue;
                             }
-                            let name_str = if item.is_dir { format!("{}/", item.name) } else { item.name.clone() };
-                            let size_str = if item.is_dir { "".to_string() } else { human_size(item.size) };
+                            let name_str = if item.is_dir {
+                                format!("{}/", item.name)
+                            } else {
+                                item.name.clone()
+                            };
+                            let size_str = if item.is_dir {
+                                String::new()
+                            } else {
+                                human_size(item.size)
+                            };
                             let time_str = fmt_time(item.mtime);
+                            let is_selected = self.selected_item == Some(idx);
+                            let is_dir = item.is_dir;
+                            let item_path = item.path.clone();
+                            let item_name = item.name.clone();
+                            let pin_str = item.path.to_string_lossy().to_string();
+                            let is_pinned = self.config.pins.iter().any(|p| p == &pin_str);
 
                             body.row(18.0, |mut row| {
+                                // ---- column 1: interaction + text ----
                                 row.col(|ui| {
-                                    let resp = ui.selectable_label(self.selected_item == Some(idx), name_str);
-                                    if resp.clicked() {
+                                    let response = ui.interact(
+                                        ui.max_rect(),
+                                        ui.id().with(("row_sel", idx)),
+                                        egui::Sense::click(),
+                                    );
+
+                                    // Paint the selection highlight *before* the text.
+                                    if is_selected {
+                                        ui.painter().rect_filled(
+                                            response.rect,
+                                            0.0,
+                                            self.theme.sel_bg,
+                                        );
+                                    }
+
+                                    if response.clicked() || response.secondary_clicked() {
                                         self.selected_item = Some(idx);
                                     }
-                                    if resp.double_clicked() {
-                                        if item.is_dir {
-                                            navigate_to = Some(item.path.to_string_lossy().to_string());
+                                    if response.double_clicked() {
+                                        if is_dir {
+                                            navigate_to = Some(
+                                                item_path.to_string_lossy().to_string(),
+                                            );
+                                        } else {
+                                            pending_action = UiAction::Open(item_path.clone());
                                         }
                                     }
+
+                                    ui.label(name_str);
+
+                                    response.context_menu(|ui| {
+                                        if ui.button("Open").clicked() {
+                                            pending_action = UiAction::Open(item_path.clone());
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("Copy").clicked() {
+                                            pending_action = UiAction::Copy;
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Cut").clicked() {
+                                            pending_action = UiAction::Cut;
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Paste").clicked() {
+                                            pending_action = UiAction::Paste;
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("Rename").clicked() {
+                                            pending_action =
+                                                UiAction::Rename(item_name.clone());
+                                            ui.close_menu();
+                                        }
+                                        if ui.button("Delete").clicked() {
+                                            pending_action = UiAction::Delete;
+                                            ui.close_menu();
+                                        }
+                                        if is_dir {
+                                            ui.separator();
+                                            let label = if is_pinned {
+                                                "Unpin from Quick Access"
+                                            } else {
+                                                "Pin to Quick Access"
+                                            };
+                                            if ui.button(label).clicked() {
+                                                pending_action = UiAction::TogglePin(
+                                                    item_path.clone(),
+                                                );
+                                                ui.close_menu();
+                                            }
+                                        }
+                                    });
                                 });
+
+                                // ---- column 2: size ----
                                 row.col(|ui| {
+                                    if is_selected {
+                                        ui.painter().rect_filled(
+                                            ui.max_rect(),
+                                            0.0,
+                                            self.theme.sel_bg,
+                                        );
+                                    }
                                     ui.label(size_str);
                                 });
+
+                                // ---- column 3: modified time ----
                                 row.col(|ui| {
+                                    if is_selected {
+                                        ui.painter().rect_filled(
+                                            ui.max_rect(),
+                                            0.0,
+                                            self.theme.sel_bg,
+                                        );
+                                    }
                                     ui.label(time_str);
                                 });
                             });
@@ -437,6 +591,30 @@ impl eframe::App for KeyFmApp {
                     });
             });
         });
+
+        // Execute anything the row / context-menu closures queued up. Done
+        // here so `self.entries` is no longer borrowed by the table loop.
+        match pending_action {
+            UiAction::None => {}
+            UiAction::Copy => self.copy_or_cut("copy"),
+            UiAction::Cut => self.copy_or_cut("cut"),
+            UiAction::Paste => self.paste(),
+            UiAction::Rename(name) => {
+                self.active_dialog = Some(("Rename".to_string(), name));
+            }
+            UiAction::Delete => self.delete_selected(false),
+            UiAction::TogglePin(path) => {
+                let p = path.to_string_lossy().to_string();
+                self.toggle_pin(&p);
+            }
+            UiAction::Open(path) => {
+                if path.is_dir() {
+                    navigate_to = Some(path.to_string_lossy().to_string());
+                } else {
+                    open_with_default_app(&path);
+                }
+            }
+        }
 
         // Dialog rendering (take() so we never hold a borrow of self while
         // touching the filesystem or refreshing the directory listing).
