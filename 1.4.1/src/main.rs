@@ -135,6 +135,14 @@ struct KeyFmApp {
     icons: IconCache,
     known_cache: Vec<(&'static str, PathBuf)>,
     drives_info_cache: Vec<(String, PathBuf, u64, u64)>,
+    search_rx: Option<std::sync::mpsc::Receiver<SearchHit>>,
+    search_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    search_threads: Option<Vec<std::thread::JoinHandle<()>>>,
+    search_debounce: Option<std::time::Instant>,
+    search_results: Vec<Item>,
+    search_running: bool,
+    search_truncated: bool,
+    last_search_query: String,
 }
 
 impl KeyFmApp {
@@ -176,6 +184,14 @@ impl KeyFmApp {
             icons: IconCache::new(),
             known_cache: drives::known_folders(),
             drives_info_cache: drives::scan_drives_info(),
+            search_rx: None,
+            search_cancel: None,
+            search_threads: None,
+            search_debounce: None,
+            search_results: Vec::new(),
+            search_running: false,
+            search_truncated: false,
+            last_search_query: String::new(),
         };
         app.refresh_dir();
         if let Some(n) = config_notice {
@@ -198,6 +214,9 @@ impl KeyFmApp {
     }
 
     fn load_tab_no_save(&mut self, index: usize) {
+        self.cancel_search();
+        self.search_query.clear();
+        self.last_search_query.clear();
         if index < self.tabs.len() {
             let tab = &self.tabs[index];
             let new_cwd = tab.cwd.clone();
@@ -283,6 +302,9 @@ impl KeyFmApp {
     }
 
     fn go_to(&mut self, new_loc: String) {
+        self.cancel_search();
+        self.search_query.clear();
+        self.last_search_query.clear();
         if !same_loc(&new_loc, &self.cwd) {
             let cur = PathBuf::from(&self.cwd);
             if let Some(t) = self.tabs.get_mut(self.cur_tab) {
@@ -316,6 +338,9 @@ impl KeyFmApp {
     }
 
     fn go_back(&mut self) {
+        self.cancel_search();
+        self.search_query.clear();
+        self.last_search_query.clear();
         let (prev, skipped) = self.pop_valid(false);
         if let Some(prev) = prev {
             let cur = PathBuf::from(&self.cwd);
@@ -330,6 +355,9 @@ impl KeyFmApp {
     }
 
     fn go_forward(&mut self) {
+        self.cancel_search();
+        self.search_query.clear();
+        self.last_search_query.clear();
         let (next, skipped) = self.pop_valid(true);
         if let Some(next) = next {
             let cur = PathBuf::from(&self.cwd);
@@ -385,14 +413,32 @@ impl KeyFmApp {
         self.active_dialog.is_some() || self.confirm_empty_bin
     }
 
+    fn rendered_entries(&self) -> &[Item] {
+        if self.search_active() {
+            &self.search_results
+        } else {
+            &self.entries
+        }
+    }
+
+    fn search_active(&self) -> bool {
+        self.search_query.chars().count() > 1
+            && (self.search_running || !self.search_results.is_empty())
+    }
+
     fn is_visible(&self, idx: usize) -> bool {
         let f = self.search_query.to_lowercase();
         f.is_empty()
-            || self.entries.get(idx).map_or(false, |e| e.name.to_lowercase().contains(&f))
+            || self
+                .rendered_entries()
+                .get(idx)
+                .map_or(false, |e| e.name.to_lowercase().contains(&f))
     }
 
     fn visible_indices(&self) -> Vec<usize> {
-        (0..self.entries.len()).filter(|&i| self.is_visible(i)).collect()
+        (0..self.rendered_entries().len())
+            .filter(|&i| self.is_visible(i))
+            .collect()
     }
 
     fn targets(&self) -> Vec<usize> {
@@ -415,8 +461,13 @@ impl KeyFmApp {
         let t = self.targets();
         if !t.is_empty() {
             self.clipboard.clear();
+            let src: &[Item] = if self.search_active() {
+                &self.search_results
+            } else {
+                &self.entries
+            };
             for idx in t {
-                if let Some(item) = self.entries.get(idx) {
+                if let Some(item) = src.get(idx) {
                     let name = item
                         .orig
                         .as_ref()
@@ -492,10 +543,15 @@ impl KeyFmApp {
             self.status_msg = "Cannot delete from this view".to_string();
             return;
         }
+        let src: &[Item] = if self.search_active() {
+            &self.search_results
+        } else {
+            &self.entries
+        };
         let paths: Vec<PathBuf> = self
             .targets()
             .into_iter()
-            .filter_map(|i| self.entries.get(i).map(|e| e.path.clone()))
+            .filter_map(|i| src.get(i).map(|e| e.path.clone()))
             .collect();
         if paths.is_empty() {
             return;
@@ -524,7 +580,7 @@ impl KeyFmApp {
         self.refresh_dir();
         if !failed.is_empty() {
             let sel: Vec<usize> = self
-                .entries
+                .rendered_entries()
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| failed.contains(&e.path))
@@ -539,6 +595,22 @@ impl KeyFmApp {
                 first_err.unwrap_or_default()
             );
         }
+    }
+
+    fn cancel_search(&mut self) {
+        if let Some(c) = self.search_cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.search_rx = None;
+        if let Some(ts) = self.search_threads.take() {
+            for t in ts {
+                let _ = t.join();
+            }
+        }
+        self.search_running = false;
+        self.search_results.clear();
+        self.search_truncated = false;
+        self.search_debounce = None;
     }
 
     fn save_cfg(&mut self) {
@@ -571,15 +643,18 @@ impl KeyFmApp {
     }
 
     fn reload(&mut self, keep_selection: bool) {
+        self.cancel_search();
         let kept_item: Option<PathBuf> = if keep_selection {
-            self.selected_item.and_then(|i| self.entries.get(i)).map(|e| e.path.clone())
+            self.selected_item
+                .and_then(|i| self.rendered_entries().get(i))
+                .map(|e| e.path.clone())
         } else {
             None
         };
         let kept_multi: Vec<PathBuf> = if keep_selection {
             self.selected_items
                 .iter()
-                .filter_map(|&i| self.entries.get(i))
+                .filter_map(|&i| self.rendered_entries().get(i))
                 .map(|e| e.path.clone())
                 .collect()
         } else {
@@ -666,6 +741,89 @@ impl eframe::App for KeyFmApp {
         let mut nav_back = false;
         let mut nav_forward = false;
         self.icons.begin_frame();
+
+        // ---- Search lifecycle: debounce, spawn, drain ----
+        if self.search_query != self.last_search_query {
+            self.selected_item = None;
+            self.selected_items.clear();
+            if self.search_query.chars().count() <= 1 {
+                self.cancel_search();
+            } else {
+                self.search_debounce = Some(std::time::Instant::now());
+            }
+            self.last_search_query = self.search_query.clone();
+        }
+
+        if let Some(t) = self.search_debounce {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            if t.elapsed().as_millis() >= SEARCH_DEBOUNCE_MS as u128 {
+                self.search_debounce = None;
+                self.cancel_search();
+                let (tx, rx) = std::sync::mpsc::channel::<SearchHit>();
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let needle = self.search_query.to_lowercase();
+                let roots: Vec<PathBuf> = if self.cwd == THIS_PC {
+                    drives::scan_drives().into_iter().map(|(_, p)| p).collect()
+                } else if self.cwd == RECYCLE {
+                    Vec::new()
+                } else {
+                    vec![PathBuf::from(&self.cwd)]
+                };
+                let mut handles = Vec::new();
+                for root in roots {
+                    let tx = tx.clone();
+                    let cancel = cancel.clone();
+                    let needle = needle.clone();
+                    let show_hidden = self.config.show_hidden;
+                    handles.push(std::thread::spawn(move || {
+                        run_walk(root, needle, show_hidden, cancel, tx);
+                    }));
+                }
+                drop(tx);
+                self.search_rx = Some(rx);
+                self.search_cancel = Some(cancel);
+                self.search_threads = Some(handles);
+                self.search_running = true;
+                self.search_truncated = false;
+                self.search_results.clear();
+            }
+        }
+
+        if self.search_running || self.search_rx.is_some() {
+            ctx.request_repaint();
+        }
+
+        if let Some(rx) = self.search_rx.take() {
+            loop {
+                match rx.try_recv() {
+                    Ok(hit) => {
+                        if self.search_results.len() < SEARCH_RESULT_CAP {
+                            self.search_results.push(hit.into_item());
+                        } else {
+                            self.search_truncated = true;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        self.search_rx = Some(rx);
+                        break;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.search_running = false;
+                        self.search_results.sort_by(|a, b| {
+                            b.is_dir
+                                .cmp(&a.is_dir)
+                                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                        });
+                        if let Some(ts) = self.search_threads.take() {
+                            for t in ts {
+                                let _ = t.join();
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
 
         // ---- Theme (unchanged) ----
         let mut visuals = if self.config.dark {
@@ -1133,7 +1291,7 @@ impl eframe::App for KeyFmApp {
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 if let Some(idx) = self.selected_item {
-                    if let Some(item) = self.entries.get(idx) {
+                    if let Some(item) = self.rendered_entries().get(idx) {
                         if item.is_dir {
                             navigate_to = Some(item.path.to_string_lossy().to_string());
                         }
@@ -1162,7 +1320,11 @@ impl eframe::App for KeyFmApp {
                 nav_forward = true;
             }
             if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
-                self.refresh_keep_selection();
+                if self.search_active() {
+                    self.last_search_query.clear();
+                } else {
+                    self.refresh_keep_selection();
+                }
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) {
                 self.copy_or_cut("copy");
@@ -1209,12 +1371,32 @@ impl eframe::App for KeyFmApp {
         // ---- Panel 4: bottom status bar (unchanged) ----
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let total = self.entries.len();
-                let shown = if self.search_query.is_empty() { total } else { self.visible_indices().len() };
-                if shown == total {
-                    ui.label(format!("{} items", total));
+                if self.search_active() && self.search_running {
+                    ui.label(format!("Searching... ({} found)", self.search_results.len()));
+                } else if self.search_active() && self.search_truncated {
+                    ui.label(format!(
+                        "{}+ found for \"{}\" (capped)",
+                        self.search_results.len(),
+                        self.search_query
+                    ));
+                } else if self.search_active() {
+                    ui.label(format!(
+                        "{} found for \"{}\"",
+                        self.search_results.len(),
+                        self.search_query
+                    ));
                 } else {
-                    ui.label(format!("{} of {} items", shown, total));
+                    let total = self.entries.len();
+                    let shown_n = if self.search_query.is_empty() {
+                        total
+                    } else {
+                        self.visible_indices().len()
+                    };
+                    if shown_n == total {
+                        ui.label(format!("{} items", total));
+                    } else {
+                        ui.label(format!("{} of {} items", shown_n, total));
+                    }
                 }
                 if !self.status_msg.is_empty() {
                     ui.separator();
@@ -1274,20 +1456,33 @@ impl eframe::App for KeyFmApp {
                     } else {
                         title_for("modified").unwrap_or("Modified")
                     };
+                    let searching = self.search_active();
+                    let shown: &[Item] =
+                        if searching { &self.search_results } else { &self.entries };
                     let size_w = self.config.size_col_width.clamp(60.0, 600.0);
                     let mod_w = self.config.mod_col_width.clamp(60.0, 400.0);
+                    let loc_w = 240.0_f32;
                     let mut size_drag = 0.0_f32;
                     let mut mod_drag = 0.0_f32;
                     let mut drag_stopped = false;
-                    egui_extras::TableBuilder::new(ui)
+                    let mut table = egui_extras::TableBuilder::new(ui)
                         .vscroll(false)
-                        .column(egui_extras::Column::remainder().clip(true))
+                        .column(egui_extras::Column::remainder().clip(true));
+                    if searching {
+                        table = table.column(egui_extras::Column::exact(loc_w));
+                    }
+                    table
                         .column(egui_extras::Column::exact(size_w))
                         .column(egui_extras::Column::exact(mod_w))
                         .header(20.0, |mut header| {
                             header.col(|ui| {
                                 ui.strong("Name");
                             });
+                            if searching {
+                                header.col(|ui| {
+                                    ui.strong(title_for("where").unwrap_or("Location"));
+                                });
+                            }
                             header.col(|ui| {
                                 ui.strong(size_title);
                                 let r = ui.max_rect();
@@ -1334,7 +1529,7 @@ impl eframe::App for KeyFmApp {
                             });
                         })
                         .body(|mut body| {
-                            for (idx, item) in self.entries.iter().enumerate() {
+                            for (idx, item) in shown.iter().enumerate() {
                                 if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
                                     continue;
                                 }
@@ -1482,6 +1677,35 @@ impl eframe::App for KeyFmApp {
                                         });
                                     });
 
+                                    if searching {
+                                        row.col(|ui| {
+                                            if self.selected_item == Some(idx)
+                                                || self.selected_items.contains(&idx)
+                                            {
+                                                ui.painter().rect_filled(
+                                                    ui.max_rect(),
+                                                    0.0,
+                                                    self.theme.sel_bg,
+                                                );
+                                            }
+                                            let loc = item_path
+                                                .parent()
+                                                .map(|p| p.to_string_lossy().to_string())
+                                                .unwrap_or_default();
+                                            let loc = if loc.chars().count() > 60 {
+                                                format!(
+                                                    "{}...",
+                                                    loc.chars().take(57).collect::<String>()
+                                                )
+                                            } else {
+                                                loc
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(loc).color(self.theme.dim),
+                                            );
+                                        });
+                                    }
+
                                     row.col(|ui| {
                                         if self.selected_item == Some(idx)
                                             || self.selected_items.contains(&idx)
@@ -1621,7 +1845,13 @@ impl eframe::App for KeyFmApp {
             UiAction::NewFile => {
                 self.active_dialog = Some(("NewFile".to_string(), String::new()));
             }
-            UiAction::Refresh => self.refresh_keep_selection(),
+            UiAction::Refresh => {
+                if self.search_active() {
+                    self.last_search_query.clear();
+                } else {
+                    self.refresh_keep_selection();
+                }
+            }
         }
 
         if self.is_virtual_view() && self.active_dialog.is_some() {
@@ -1725,8 +1955,12 @@ impl eframe::App for KeyFmApp {
                             }),
                         "Rename" => {
                             let idx = self.selected_item.ok_or("No item selected")?;
-                            let old =
-                                self.entries.get(idx).ok_or("No item selected")?.path.clone();
+                            let old = self
+                                .rendered_entries()
+                                .get(idx)
+                                .ok_or("No item selected")?
+                                .path
+                                .clone();
                             if old == target {
                                 return Ok(());
                             }
@@ -1746,7 +1980,9 @@ impl eframe::App for KeyFmApp {
                     Ok(()) => {
                         self.status_msg.clear();
                         self.refresh_dir();
-                        if let Some(pos) = self.entries.iter().position(|it| it.path == target) {
+                        if let Some(pos) =
+                            self.rendered_entries().iter().position(|it| it.path == target)
+                        {
                             self.selected_item = Some(pos);
                         }
                     }
