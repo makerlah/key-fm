@@ -944,7 +944,7 @@ impl eframe::App for KeyFmApp {
                 let menu_row_bottom = menu_row_top + TOPBAR_ROW_H;
 
                 // ----- Separators (horizontal under menus, vertical on right edge) -----
-                let sep = egui::Stroke::new(1.0, self.theme.border);
+                let sep = egui::Stroke::new(1.0_f32, self.theme.border);
                 ui.painter().line_segment(
                     [
                         egui::pos2(panel_rect.left(), menu_row_bottom),
@@ -1097,7 +1097,7 @@ impl eframe::App for KeyFmApp {
                 });
                 let row_bottom = row_top + TOPBAR_ROW_H;
 
-                let sep = egui::Stroke::new(1.0, self.theme.border);
+                let sep = egui::Stroke::new(1.0_f32, self.theme.border);
                 ui.painter().line_segment(
                     [
                         egui::pos2(panel_rect.left(), row_bottom),
