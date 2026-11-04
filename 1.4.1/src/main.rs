@@ -143,6 +143,7 @@ struct KeyFmApp {
     search_running: bool,
     search_truncated: bool,
     last_search_query: String,
+    show_shortcuts: bool,
 }
 
 impl KeyFmApp {
@@ -165,6 +166,7 @@ impl KeyFmApp {
         let tab = Tab::new(Some(start_dir.clone()));
         let mut app = Self {
             config,
+            show_shortcuts: false,
             theme,
             cwd,
             entries: Vec::new(),
