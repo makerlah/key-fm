@@ -144,6 +144,12 @@ impl KeyFmApp {
         if config.sidebar_width < 120.0 {
             config.sidebar_width = keyfm::config::default_sidebar_width();
         }
+        if config.size_col_width < 60.0 {
+            config.size_col_width = keyfm::config::default_size_col();
+        }
+        if config.mod_col_width < 60.0 {
+            config.mod_col_width = keyfm::config::default_mod_col();
+        }
         let theme = if config.dark { DARK } else { LIGHT };
         let start_dir = get_start_dir(start);
         let cwd = start_dir.to_string_lossy().to_string();
@@ -1248,8 +1254,6 @@ impl eframe::App for KeyFmApp {
                     let in_bin = self.cwd == RECYCLE;
                     let ppp = ctx.pixels_per_point();
                     let row_h = if is_pc { 36.0 } else { 18.0 };
-                    let size_w = if is_pc { 320.0 } else { 100.0 };
-                    let mod_w = if is_pc { 10.0 } else { 150.0 };
                     let size_title = if is_pc {
                         pc_title_for("size").unwrap_or("")
                     } else {
@@ -1262,11 +1266,19 @@ impl eframe::App for KeyFmApp {
                     } else {
                         title_for("modified").unwrap_or("Modified")
                     };
+                    let table_id = egui::Id::new("file_list_table");
+                    let mut table_state = egui_extras::TableState::load(ui.ctx(), table_id)
+                        .unwrap_or_else(|| {
+                            let mut s = egui_extras::TableState::default();
+                            s.set_column_widths([0.0, self.config.size_col_width, self.config.mod_col_width]);
+                            s
+                        });
                     egui_extras::TableBuilder::new(ui)
+                        .state(&mut table_state)
                         .vscroll(false)
-                        .column(egui_extras::Column::remainder())
-                        .column(egui_extras::Column::exact(size_w))
-                        .column(egui_extras::Column::exact(mod_w))
+                        .column(egui_extras::Column::remainder().resizable(true).clip(true))
+                        .column(egui_extras::Column::initial(self.config.size_col_width).resizable(true).range(60.0..=600.0))
+                        .column(egui_extras::Column::initial(self.config.mod_col_width).resizable(true).range(60.0..=400.0))
                         .header(20.0, |mut header| {
                             header.col(|ui| {
                                 ui.strong("Name");
@@ -1474,6 +1486,19 @@ impl eframe::App for KeyFmApp {
                                 });
                             }
                         });
+
+                    if let Some(widths) = table_state.col_widths() {
+                        if let (Some(w1), Some(w2)) = (widths.get(1), widths.get(2)) {
+                            if (*w1 - self.config.size_col_width).abs() > 1.0
+                                || (*w2 - self.config.mod_col_width).abs() > 1.0
+                            {
+                                self.config.size_col_width = *w1;
+                                self.config.mod_col_width = *w2;
+                                self.save_cfg();
+                            }
+                        }
+                    }
+                    table_state.store(ui.ctx(), table_id);
 
                     let remaining_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
                     if remaining_height > 0.0 {

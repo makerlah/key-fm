@@ -22,10 +22,22 @@ pub struct Config {
     pub keys: HashMap<String, Vec<String>>,
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: f32,
+    #[serde(default = "default_size_col")]
+    pub size_col_width: f32,
+    #[serde(default = "default_mod_col")]
+    pub mod_col_width: f32,
 }
 
 pub fn default_sidebar_width() -> f32 {
     220.0
+}
+
+pub fn default_size_col() -> f32 {
+    100.0
+}
+
+pub fn default_mod_col() -> f32 {
+    150.0
 }
 
 pub fn config_path() -> Option<PathBuf> {
