@@ -412,7 +412,7 @@ impl KeyFmApp {
     }
 
     fn modal_open(&self) -> bool {
-        self.active_dialog.is_some() || self.confirm_empty_bin
+        self.active_dialog.is_some() || self.confirm_empty_bin || self.show_shortcuts
     }
 
     fn rendered_entries(&self) -> &[Item] {
