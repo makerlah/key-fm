@@ -1268,6 +1268,10 @@ impl eframe::App for KeyFmApp {
             });
 
         // ---- Keyboard handling (unchanged) ----
+        if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
+            self.show_shortcuts = !self.show_shortcuts;
+        }
+
         if !ctx.wants_keyboard_input() && !self.modal_open() {
             // File Ops
             if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
