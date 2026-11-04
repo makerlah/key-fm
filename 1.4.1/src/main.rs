@@ -1266,28 +1266,63 @@ impl eframe::App for KeyFmApp {
                     } else {
                         title_for("modified").unwrap_or("Modified")
                     };
-                    let table_id = egui::Id::new("file_list_table");
-                    let mut table_state = egui_extras::TableState::load(ui.ctx(), table_id)
-                        .unwrap_or_else(|| {
-                            let mut s = egui_extras::TableState::default();
-                            s.set_column_widths([0.0, self.config.size_col_width, self.config.mod_col_width]);
-                            s
-                        });
+                    let size_w = self.config.size_col_width.clamp(60.0, 600.0);
+                    let mod_w = self.config.mod_col_width.clamp(60.0, 400.0);
+                    let mut size_drag = 0.0_f32;
+                    let mut mod_drag = 0.0_f32;
+                    let mut drag_stopped = false;
                     egui_extras::TableBuilder::new(ui)
-                        .state(&mut table_state)
                         .vscroll(false)
-                        .column(egui_extras::Column::remainder().resizable(true).clip(true))
-                        .column(egui_extras::Column::initial(self.config.size_col_width).resizable(true).range(60.0..=600.0))
-                        .column(egui_extras::Column::initial(self.config.mod_col_width).resizable(true).range(60.0..=400.0))
+                        .column(egui_extras::Column::remainder().clip(true))
+                        .column(egui_extras::Column::exact(size_w))
+                        .column(egui_extras::Column::exact(mod_w))
                         .header(20.0, |mut header| {
                             header.col(|ui| {
                                 ui.strong("Name");
                             });
                             header.col(|ui| {
                                 ui.strong(size_title);
+                                let r = ui.max_rect();
+                                let handle = egui::Rect::from_x_y_ranges(
+                                    (r.left() - 4.0)..=(r.left() + 4.0),
+                                    r.top()..=r.bottom(),
+                                );
+                                let resp = ui.interact(
+                                    handle,
+                                    ui.id().with("resize_size_col"),
+                                    egui::Sense::drag(),
+                                );
+                                if resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                }
+                                if resp.dragged() {
+                                    size_drag -= resp.drag_delta().x;
+                                }
+                                if resp.drag_stopped() {
+                                    drag_stopped = true;
+                                }
                             });
                             header.col(|ui| {
                                 ui.strong(mod_title);
+                                let r = ui.max_rect();
+                                let handle = egui::Rect::from_x_y_ranges(
+                                    (r.left() - 4.0)..=(r.left() + 4.0),
+                                    r.top()..=r.bottom(),
+                                );
+                                let resp = ui.interact(
+                                    handle,
+                                    ui.id().with("resize_mod_col"),
+                                    egui::Sense::drag(),
+                                );
+                                if resp.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                }
+                                if resp.dragged() {
+                                    mod_drag -= resp.drag_delta().x;
+                                }
+                                if resp.drag_stopped() {
+                                    drag_stopped = true;
+                                }
                             });
                         })
                         .body(|mut body| {
@@ -1487,18 +1522,15 @@ impl eframe::App for KeyFmApp {
                             }
                         });
 
-                    if let Some(widths) = table_state.col_widths() {
-                        if let (Some(w1), Some(w2)) = (widths.get(1), widths.get(2)) {
-                            if (*w1 - self.config.size_col_width).abs() > 1.0
-                                || (*w2 - self.config.mod_col_width).abs() > 1.0
-                            {
-                                self.config.size_col_width = *w1;
-                                self.config.mod_col_width = *w2;
-                                self.save_cfg();
-                            }
-                        }
+                    if size_drag != 0.0 || mod_drag != 0.0 {
+                        self.config.size_col_width =
+                            (self.config.size_col_width + size_drag).clamp(60.0, 600.0);
+                        self.config.mod_col_width =
+                            (self.config.mod_col_width + mod_drag).clamp(60.0, 400.0);
                     }
-                    table_state.store(ui.ctx(), table_id);
+                    if drag_stopped {
+                        self.save_cfg();
+                    }
 
                     let remaining_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
                     if remaining_height > 0.0 {
