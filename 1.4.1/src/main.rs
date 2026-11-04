@@ -1273,11 +1273,15 @@ impl eframe::App for KeyFmApp {
         }
 
         if self.show_shortcuts {
+            let dim_color = self.theme.dim;
             let mut is_open = true;
-            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-                is_open = false;
-            }
-            let theme_dim = self.theme.dim;
+            let mut close_clicked = false;
+            let add_row = |ui: &mut egui::Ui, label: &str, keys: &str| {
+                ui.label(label);
+                ui.label(egui::RichText::new(keys).color(dim_color));
+                ui.end_row();
+            };
+
             egui::Window::new("Keyboard Shortcuts")
                 .open(&mut is_open)
                 .collapsible(false)
@@ -1287,74 +1291,72 @@ impl eframe::App for KeyFmApp {
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
                         egui::Grid::new("shortcuts_grid").num_columns(2).spacing([40.0, 4.0]).striped(true).show(ui, |ui| {
-                            let mut add_row = |label: &str, keys: &str| {
-                                ui.label(label);
-                                ui.label(egui::RichText::new(keys).color(theme_dim));
-                                ui.end_row();
-                            };
                             ui.heading("Tabs"); ui.end_row();
-                            add_row("New tab", "Ctrl+T");
-                            add_row("Close tab", "Ctrl+W");
-                            add_row("Next tab", "Ctrl+Tab, Ctrl+PgDn");
-                            add_row("Previous tab", "Ctrl+Shift+Tab, Ctrl+PgUp");
-                            add_row("Go to tab 1-9", "Alt+1 ... Alt+9");
+                            add_row(ui, "New tab", "Ctrl+T");
+                            add_row(ui, "Close tab", "Ctrl+W");
+                            add_row(ui, "Next tab", "Ctrl+Tab, Ctrl+PgDn");
+                            add_row(ui, "Previous tab", "Ctrl+Shift+Tab, Ctrl+PgUp");
+                            add_row(ui, "Go to tab 1-9", "Alt+1 ... Alt+9");
                             ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Navigation"); ui.end_row();
-                            add_row("Open selected item", "Enter");
-                            add_row("Up one folder", "Backspace, Left, Alt+Up");
-                            add_row("Back", "Alt+Left");
-                            add_row("Forward", "Alt+Right");
-                            add_row("Go to home folder", "Alt+Home");
-                            add_row("Go to This PC", "Ctrl+Shift+M");
-                            add_row("Go to Recycle Bin", "Ctrl+Shift+B");
-                            add_row("First item", "Home");
-                            add_row("Last item", "End");
-                            add_row("Move up 15 rows", "PgUp");
-                            add_row("Move down 15 rows", "PgDn");
+                            add_row(ui, "Open selected item", "Enter");
+                            add_row(ui, "Up one folder", "Backspace, Left, Alt+Up");
+                            add_row(ui, "Back", "Alt+Left");
+                            add_row(ui, "Forward", "Alt+Right");
+                            add_row(ui, "Go to home folder", "Alt+Home");
+                            add_row(ui, "Go to This PC", "Ctrl+Shift+M");
+                            add_row(ui, "Go to Recycle Bin", "Ctrl+Shift+B");
+                            add_row(ui, "First item", "Home");
+                            add_row(ui, "Last item", "End");
+                            add_row(ui, "Move up 15 rows", "PgUp");
+                            add_row(ui, "Move down 15 rows", "PgDn");
                             ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Files"); ui.end_row();
-                            add_row("Select all", "Ctrl+A");
-                            add_row("Copy", "Ctrl+C");
-                            add_row("Cut", "Ctrl+X");
-                            add_row("Paste", "Ctrl+V");
-                            add_row("Rename", "F2");
-                            add_row("Delete (to Recycle Bin)", "Delete");
-                            add_row("Delete permanently", "Shift+Delete");
-                            add_row("New file", "Ctrl+N");
-                            add_row("New folder", "Ctrl+Shift+N");
+                            add_row(ui, "Select all", "Ctrl+A");
+                            add_row(ui, "Copy", "Ctrl+C");
+                            add_row(ui, "Cut", "Ctrl+X");
+                            add_row(ui, "Paste", "Ctrl+V");
+                            add_row(ui, "Rename", "F2");
+                            add_row(ui, "Delete (to Recycle Bin)", "Delete");
+                            add_row(ui, "Delete permanently", "Shift+Delete");
+                            add_row(ui, "New file", "Ctrl+N");
+                            add_row(ui, "New folder", "Ctrl+Shift+N");
                             ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Quick access"); ui.end_row();
-                            add_row("Pin / unpin this folder", "Ctrl+P");
+                            add_row(ui, "Pin / unpin this folder", "Ctrl+P");
                             ui.add_space(8.0); ui.end_row();
 
                             ui.heading("View"); ui.end_row();
-                            add_row("Show / hide hidden files", "Ctrl+H");
-                            add_row("Dark / light mode", "Ctrl+Shift+D");
-                            add_row("Sort by name", "Ctrl+1");
-                            add_row("Sort by size", "Ctrl+2");
-                            add_row("Sort by date", "Ctrl+3");
-                            add_row("Refresh", "F5, Ctrl+R");
+                            add_row(ui, "Show / hide hidden files", "Ctrl+H");
+                            add_row(ui, "Dark / light mode", "Ctrl+Shift+D");
+                            add_row(ui, "Sort by name", "Ctrl+1");
+                            add_row(ui, "Sort by size", "Ctrl+2");
+                            add_row(ui, "Sort by date", "Ctrl+3");
+                            add_row(ui, "Refresh", "F5, Ctrl+R");
                             ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Fixed keys"); ui.end_row();
-                            add_row("Up / Down", "Move selection");
-                            add_row("Shift+Up / Shift+Down", "Extend selection");
-                            add_row("Space", "Toggle focused item");
-                            add_row("Esc", "Clear filter / close this menu");
-                            add_row("Click + drag", "Draw selection box (lasso)");
-                            add_row("F1", "Show this help");
-                            add_row("Ctrl+Q", "Quit");
+                            add_row(ui, "Up / Down", "Move selection");
+                            add_row(ui, "Shift+Up / Shift+Down", "Extend selection");
+                            add_row(ui, "Space", "Toggle focused item");
+                            add_row(ui, "Esc", "Clear filter / close this menu");
+                            add_row(ui, "Click + drag", "Draw selection box (lasso)");
+                            add_row(ui, "F1", "Show this help");
+                            add_row(ui, "Ctrl+Q", "Quit");
                         });
                     });
                     ui.add_space(10.0);
                     if ui.button("Close").clicked() {
-                        is_open = false;
+                        close_clicked = true;
                     }
                 });
-            self.show_shortcuts = is_open;
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || close_clicked || !is_open {
+                self.show_shortcuts = false;
+            }
         }
 
         if !ctx.wants_keyboard_input() && !self.modal_open() {
