@@ -120,7 +120,7 @@ struct KeyFmApp {
     cwd: String,
     entries: Vec<Item>,
     selected_item: Option<usize>,
-    filter: String,
+    search_query: String,
     path_input: String,
     tabs: Vec<Tab>,
     cur_tab: usize,
@@ -161,7 +161,7 @@ impl KeyFmApp {
             cwd,
             entries: Vec::new(),
             selected_item: None,
-            filter: String::new(),
+            search_query: String::new(),
             path_input,
             tabs: vec![tab],
             cur_tab: 0,
@@ -187,7 +187,7 @@ impl KeyFmApp {
     fn save_current_tab(&mut self) {
         if let Some(tab) = self.tabs.get_mut(self.cur_tab) {
             tab.cwd = Some(std::path::PathBuf::from(&self.cwd));
-            tab.filter = self.filter.clone();
+            tab.search_query = self.search_query.clone();
             tab.focus = self.selected_item.and_then(|idx| self.entries.get(idx)).map(|item| item.path.clone());
         }
     }
@@ -201,13 +201,13 @@ impl KeyFmApp {
         if index < self.tabs.len() {
             let tab = &self.tabs[index];
             let new_cwd = tab.cwd.clone();
-            let new_filter = tab.filter.clone();
+            let new_query = tab.search_query.clone();
             let new_focus = tab.focus.clone();
 
             if let Some(cwd) = new_cwd {
                 self.cwd = cwd.to_string_lossy().to_string();
             }
-            self.filter = new_filter;
+            self.search_query = new_query;
             self.cur_tab = index;
 
             self.refresh_dir();
@@ -386,7 +386,7 @@ impl KeyFmApp {
     }
 
     fn is_visible(&self, idx: usize) -> bool {
-        let f = self.filter.to_lowercase();
+        let f = self.search_query.to_lowercase();
         f.is_empty()
             || self.entries.get(idx).map_or(false, |e| e.name.to_lowercase().contains(&f))
     }
@@ -1085,7 +1085,7 @@ impl eframe::App for KeyFmApp {
                         navigate_to = Some(self.path_input.clone());
                     }
                     ui.label("Filter:");
-                    ui.text_edit_singleline(&mut self.filter);
+                    ui.text_edit_singleline(&mut self.search_query);
                 });
                 let row_bottom = row_top + TOPBAR_ROW_H;
 
@@ -1202,7 +1202,7 @@ impl eframe::App for KeyFmApp {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 let total = self.entries.len();
-                let shown = if self.filter.is_empty() { total } else { self.visible_indices().len() };
+                let shown = if self.search_query.is_empty() { total } else { self.visible_indices().len() };
                 if shown == total {
                     ui.label(format!("{} items", total));
                 } else {
@@ -1249,7 +1249,7 @@ impl eframe::App for KeyFmApp {
                 .auto_shrink([false, false])
                 .drag_to_scroll(false)
                 .show(ui, |ui| {
-                    let filter = self.filter.to_lowercase();
+                    let filter = self.search_query.to_lowercase();
                     let is_pc = self.cwd == THIS_PC;
                     let in_bin = self.cwd == RECYCLE;
                     let ppp = ctx.pixels_per_point();

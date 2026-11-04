@@ -22,7 +22,7 @@ pub struct Tab {
     pub fwd: Vec<PathBuf>,
     pub sort_col: String,
     pub sort_reverse: bool,
-    pub filter: String,
+    pub search_query: String,
     pub sel: Vec<PathBuf>,
     pub focus: Option<PathBuf>,
 }
@@ -35,7 +35,7 @@ impl Tab {
             fwd: Vec::new(),
             sort_col: "name".to_string(),
             sort_reverse: false,
-            filter: String::new(),
+            search_query: String::new(),
             sel: Vec::new(),
             focus: None,
         }
