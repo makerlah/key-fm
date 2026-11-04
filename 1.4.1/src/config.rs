@@ -20,6 +20,12 @@ pub struct Config {
     pub unpinned: Vec<String>,
     pub assoc: HashMap<String, AssocEntry>,
     pub keys: HashMap<String, Vec<String>>,
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
+}
+
+pub fn default_sidebar_width() -> f32 {
+    220.0
 }
 
 pub fn config_path() -> Option<PathBuf> {

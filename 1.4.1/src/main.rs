@@ -800,9 +800,9 @@ impl eframe::App for KeyFmApp {
             });
 
         // ---- Panel 2: sidebar (left) — menus at top, then quick access ----
-        egui::SidePanel::left("sidebar")
+        let sidebar_inner = egui::SidePanel::left("sidebar")
             .resizable(true)
-            .default_width(220.0)
+            .default_width(self.config.sidebar_width)
             .min_width(120.0)
             .max_width(600.0)
             .frame(egui::Frame::default().fill(self.theme.bg))
@@ -1038,6 +1038,12 @@ impl eframe::App for KeyFmApp {
                     });
                 }
             });
+
+        let sidebar_width = sidebar_inner.response.rect.width();
+        if (sidebar_width - self.config.sidebar_width).abs() > 1.0 {
+            self.config.sidebar_width = sidebar_width;
+            self.save_cfg();
+        }
 
         // ---- Panel 3: toolbar (top of the right area) ----
         let can_back = self.tabs.get(self.cur_tab).map_or(false, |t| !t.back.is_empty());
