@@ -1267,6 +1267,103 @@ impl eframe::App for KeyFmApp {
 
         // ---- Keyboard handling (unchanged) ----
         if !ctx.wants_keyboard_input() && !self.modal_open() {
+            // Go to tab 1-9
+            for i in 1..=9 {
+                let key = match i {
+                    1 => egui::Key::Num1, 2 => egui::Key::Num2, 3 => egui::Key::Num3,
+                    4 => egui::Key::Num4, 5 => egui::Key::Num5, 6 => egui::Key::Num6,
+                    7 => egui::Key::Num7, 8 => egui::Key::Num8, _ => egui::Key::Num9,
+                };
+                if ctx.input(|inp| inp.modifiers.alt && inp.key_pressed(key)) {
+                    if self.tabs.len() >= i {
+                        self.load_tab(i - 1);
+                    }
+                }
+            }
+
+            // Next / Prev tab with Ctrl+PgDn / Ctrl+PgUp
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::PageDown)) {
+                if self.tabs.len() > 1 {
+                    let next = (self.cur_tab + 1) % self.tabs.len();
+                    self.load_tab(next);
+                }
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::PageUp)) {
+                if self.tabs.len() > 1 {
+                    let prev = if self.cur_tab == 0 { self.tabs.len() - 1 } else { self.cur_tab - 1 };
+                    self.load_tab(prev);
+                }
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+                let vis = self.visible_indices();
+                if !vis.is_empty() { self.selected_item = Some(vis[0]); self.selected_items.clear(); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+                let vis = self.visible_indices();
+                if !vis.is_empty() { self.selected_item = Some(*vis.last().unwrap()); self.selected_items.clear(); }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+                let vis = self.visible_indices();
+                if !vis.is_empty() {
+                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let new_pos = pos.saturating_sub(15);
+                    self.selected_item = Some(vis[new_pos]);
+                    self.selected_items.clear();
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
+                let vis = self.visible_indices();
+                if !vis.is_empty() {
+                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let new_pos = (pos + 15).min(vis.len() - 1);
+                    self.selected_item = Some(vis[new_pos]);
+                    self.selected_items.clear();
+                }
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::M)) {
+                navigate_to = Some(THIS_PC.to_string());
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::B)) {
+                navigate_to = Some(RECYCLE.to_string());
+            }
+            if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::Home)) {
+                if let Some(ud) = directories::UserDirs::new() {
+                    navigate_to = Some(ud.home_dir().to_string_lossy().to_string());
+                }
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+                if let Some(idx) = self.selected_item {
+                    if self.selected_items.contains(&idx) {
+                        self.selected_items.retain(|&x| x != idx);
+                    } else {
+                        self.selected_items.push(idx);
+                    }
+                }
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
+                self.selected_items = self.visible_indices();
+            }
+            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowDown)) {
+                let vis = self.visible_indices();
+                if !vis.is_empty() {
+                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let new_pos = (pos + 1).min(vis.len() - 1);
+                    self.selected_item = Some(vis[new_pos]);
+                    if !self.selected_items.contains(&vis[new_pos]) { self.selected_items.push(vis[new_pos]); }
+                }
+            }
+            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowUp)) {
+                let vis = self.visible_indices();
+                if !vis.is_empty() {
+                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let new_pos = pos.saturating_sub(1);
+                    self.selected_item = Some(vis[new_pos]);
+                    if !self.selected_items.contains(&vis[new_pos]) { self.selected_items.push(vis[new_pos]); }
+                }
+            }
+
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
