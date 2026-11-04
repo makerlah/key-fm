@@ -140,6 +140,10 @@ struct KeyFmApp {
 impl KeyFmApp {
     fn new(start: Option<String>) -> Self {
         let (config, config_notice) = keyfm::config::load_config_status();
+        let mut config = config;
+        if config.sidebar_width < 120.0 {
+            config.sidebar_width = keyfm::config::default_sidebar_width();
+        }
         let theme = if config.dark { DARK } else { LIGHT };
         let start_dir = get_start_dir(start);
         let cwd = start_dir.to_string_lossy().to_string();
