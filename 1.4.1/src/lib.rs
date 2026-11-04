@@ -8,4 +8,4 @@ pub mod models;
 pub mod drives;
 pub mod apps;
 pub mod icons;
-pub const VERSION: &str = "1.3.0";
+pub const VERSION: &str = "1.4.1";

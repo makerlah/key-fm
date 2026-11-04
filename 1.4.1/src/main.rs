@@ -1277,11 +1277,10 @@ impl eframe::App for KeyFmApp {
                     }
                 }
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::N)) {
-                self.active_dialog = Some(("NewFile".to_string(), String::new()));
-            }
             if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::N)) {
                 self.active_dialog = Some(("NewFolder".to_string(), String::new()));
+            } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::N)) {
+                self.active_dialog = Some(("NewFile".to_string(), String::new()));
             }
             if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Delete)) {
                 self.confirm_empty_bin = true;
