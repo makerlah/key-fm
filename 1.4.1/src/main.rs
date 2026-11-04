@@ -1297,7 +1297,6 @@ impl eframe::App for KeyFmApp {
                             add_row(ui, "Next tab", "Ctrl+Tab, Ctrl+PgDn");
                             add_row(ui, "Previous tab", "Ctrl+Shift+Tab, Ctrl+PgUp");
                             add_row(ui, "Go to tab 1-9", "Alt+1 ... Alt+9");
-                            ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Navigation"); ui.end_row();
                             add_row(ui, "Open selected item", "Enter");
@@ -1311,7 +1310,6 @@ impl eframe::App for KeyFmApp {
                             add_row(ui, "Last item", "End");
                             add_row(ui, "Move up 15 rows", "PgUp");
                             add_row(ui, "Move down 15 rows", "PgDn");
-                            ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Files"); ui.end_row();
                             add_row(ui, "Select all", "Ctrl+A");
@@ -1323,11 +1321,9 @@ impl eframe::App for KeyFmApp {
                             add_row(ui, "Delete permanently", "Shift+Delete");
                             add_row(ui, "New file", "Ctrl+N");
                             add_row(ui, "New folder", "Ctrl+Shift+N");
-                            ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Quick access"); ui.end_row();
                             add_row(ui, "Pin / unpin this folder", "Ctrl+P");
-                            ui.add_space(8.0); ui.end_row();
 
                             ui.heading("View"); ui.end_row();
                             add_row(ui, "Show / hide hidden files", "Ctrl+H");
@@ -1336,7 +1332,6 @@ impl eframe::App for KeyFmApp {
                             add_row(ui, "Sort by size", "Ctrl+2");
                             add_row(ui, "Sort by date", "Ctrl+3");
                             add_row(ui, "Refresh", "F5, Ctrl+R");
-                            ui.add_space(8.0); ui.end_row();
 
                             ui.heading("Fixed keys"); ui.end_row();
                             add_row(ui, "Up / Down", "Move selection");
