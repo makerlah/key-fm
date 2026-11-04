@@ -1274,6 +1274,10 @@ impl eframe::App for KeyFmApp {
 
         if self.show_shortcuts {
             let mut is_open = true;
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                is_open = false;
+            }
+            let theme_dim = self.theme.dim;
             egui::Window::new("Keyboard Shortcuts")
                 .open(&mut is_open)
                 .collapsible(false)
@@ -1281,16 +1285,13 @@ impl eframe::App for KeyFmApp {
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .default_width(500.0)
                 .show(ctx, |ui| {
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        is_open = false;
-                    }
                     egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
-                        let mut add_row = |label: &str, keys: &str| {
-                            ui.label(label);
-                            ui.label(egui::RichText::new(keys).color(self.theme.dim));
-                            ui.end_row();
-                        };
                         egui::Grid::new("shortcuts_grid").num_columns(2).spacing([40.0, 4.0]).striped(true).show(ui, |ui| {
+                            let mut add_row = |label: &str, keys: &str| {
+                                ui.label(label);
+                                ui.label(egui::RichText::new(keys).color(theme_dim));
+                                ui.end_row();
+                            };
                             ui.heading("Tabs"); ui.end_row();
                             add_row("New tab", "Ctrl+T");
                             add_row("Close tab", "Ctrl+W");
