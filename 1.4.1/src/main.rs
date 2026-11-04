@@ -1269,6 +1269,70 @@ impl eframe::App for KeyFmApp {
 
         // ---- Keyboard handling (unchanged) ----
         if !ctx.wants_keyboard_input() && !self.modal_open() {
+            // File Ops
+            if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
+                if let Some(idx) = self.selected_item {
+                    if let Some(item) = self.rendered_entries().get(idx) {
+                        self.active_dialog = Some(("Rename".to_string(), item.name.clone()));
+                    }
+                }
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::N)) {
+                self.active_dialog = Some(("NewFile".to_string(), String::new()));
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::N)) {
+                self.active_dialog = Some(("NewFolder".to_string(), String::new()));
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Delete)) {
+                self.confirm_empty_bin = true;
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::C)) {
+                if let Some(idx) = self.selected_item {
+                    if let Some(item) = self.rendered_entries().get(idx) {
+                        ctx.copy_text(item.path.to_string_lossy().to_string());
+                        self.status_msg = "Path copied to clipboard".to_string();
+                    }
+                }
+            }
+
+            // View & System
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::H)) {
+                self.config.show_hidden = !self.config.show_hidden;
+                self.save_cfg();
+                self.refresh_keep_selection();
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num1)) {
+                self.entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num2)) {
+                self.entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| b.size.cmp(&a.size)));
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num3)) {
+                self.entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| b.mtime.partial_cmp(&a.mtime).unwrap_or(std::cmp::Ordering::Equal)));
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::R)) {
+                self.refresh_keep_selection();
+            }
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Q)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
+            // Quick access
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::P)) {
+                if !self.is_virtual_view() {
+                    let p = self.cwd.clone();
+                    if !self.config.pins.contains(&p) {
+                        self.config.pins.push(p);
+                        self.save_cfg();
+                        self.status_msg = "Pinned to Quick Access".to_string();
+                    } else {
+                        self.config.pins.retain(|x| x != &p);
+                        self.save_cfg();
+                        self.status_msg = "Unpinned from Quick Access".to_string();
+                    }
+                }
+            }
+
             // Go to tab 1-9
             for i in 1..=9 {
                 let key = match i {
