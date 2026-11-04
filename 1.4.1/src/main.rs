@@ -1084,8 +1084,16 @@ impl eframe::App for KeyFmApp {
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         navigate_to = Some(self.path_input.clone());
                     }
-                    ui.label("Filter:");
-                    ui.text_edit_singleline(&mut self.search_query);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(PANEL_PAD_X);
+                        let search_resp = ui.add_sized(
+                            [200.0, 20.0],
+                            egui::TextEdit::singleline(&mut self.search_query).hint_text("Search")
+                        );
+                        if search_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            self.search_query.clear();
+                        }
+                    });
                 });
                 let row_bottom = row_top + TOPBAR_ROW_H;
 
