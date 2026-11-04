@@ -1347,8 +1347,6 @@ impl eframe::App for KeyFmApp {
                                     human_size(item.size)
                                 };
                                 let time_str = fmt_time(item.mtime);
-                                let is_selected = self.selected_item == Some(idx);
-                                let is_multi_selected = self.selected_items.contains(&idx);
                                 let is_dir = item.is_dir;
                                 let item_path = item.path.clone();
                                 let item_name = item.name.clone();
@@ -1387,7 +1385,9 @@ impl eframe::App for KeyFmApp {
                                                 }
                                             }
                                         }
-                                        if is_selected || is_multi_selected {
+                                        if self.selected_item == Some(idx)
+                                            || self.selected_items.contains(&idx)
+                                        {
                                             ui.painter().rect_filled(
                                                 response.rect,
                                                 0.0,
@@ -1483,7 +1483,9 @@ impl eframe::App for KeyFmApp {
                                     });
 
                                     row.col(|ui| {
-                                        if is_selected || is_multi_selected {
+                                        if self.selected_item == Some(idx)
+                                            || self.selected_items.contains(&idx)
+                                        {
                                             ui.painter().rect_filled(ui.max_rect(), 0.0, self.theme.sel_bg);
                                         }
                                         if is_pc && item_total > 0 {
@@ -1521,7 +1523,9 @@ impl eframe::App for KeyFmApp {
                                     });
 
                                     row.col(|ui| {
-                                        if is_selected || is_multi_selected {
+                                        if self.selected_item == Some(idx)
+                                            || self.selected_items.contains(&idx)
+                                        {
                                             ui.painter().rect_filled(ui.max_rect(), 0.0, self.theme.sel_bg);
                                         }
                                         ui.label(time_str);
