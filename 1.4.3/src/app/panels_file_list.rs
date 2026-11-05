@@ -182,7 +182,11 @@ impl KeyFmApp {
                                             if ui.button("Rename").clicked() {
                                                 *pending_action = UiAction::Rename(item_name.clone()); ui.close_menu();
                                             }
-                                            if ui.button("Delete").clicked() { *pending_action = UiAction::Delete; ui.close_menu(); }
+                                        }
+                                        if !virt_view || in_bin {
+                                            ui.separator();
+                                            let label = if in_bin { "Delete permanently" } else { "Delete" };
+                                            if ui.button(label).clicked() { *pending_action = UiAction::Delete; ui.close_menu(); }
                                         }
                                         if can_pin {
                                             ui.separator();

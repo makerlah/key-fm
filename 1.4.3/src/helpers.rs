@@ -157,17 +157,28 @@ pub fn is_windows_hidden(meta: Option<&std::fs::Metadata>) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn clear_readonly_recursive(path: &Path) -> io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.permissions().readonly() {
+        let mut perms = meta.permissions();
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let _ = clear_readonly_recursive(&entry.path());
+        }
+    }
+    Ok(())
+}
+
 // EDITED: Handle read-only files (especially needed for Recycle Bin deletes)
 pub fn delete_permanently(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        if let Ok(meta) = std::fs::symlink_metadata(path) {
-            if meta.permissions().readonly() {
-                let mut perms = meta.permissions();
-                perms.set_readonly(false);
-                let _ = std::fs::set_permissions(path, perms);
-            }
-        }
+        let _ = clear_readonly_recursive(path);
     }
     let meta = std::fs::symlink_metadata(path)?;
     if meta.is_dir() {

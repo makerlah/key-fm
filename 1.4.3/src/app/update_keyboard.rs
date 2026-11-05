@@ -276,7 +276,11 @@ impl KeyFmApp {
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) { self.copy_or_cut("copy"); }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::X)) { self.copy_or_cut("cut"); }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V)) { self.paste(); }
-            if ctx.input(|i| i.key_pressed(egui::Key::Delete)) { self.delete_selected(false); }
+            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::Delete)) {
+                self.delete_selected(true);
+            } else if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+                self.delete_selected(false);
+            }
             if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::D)) {
                 self.config.dark = !self.config.dark;
                 self.theme = if self.config.dark { crate::theme::DARK } else { crate::theme::LIGHT };

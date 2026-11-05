@@ -155,13 +155,14 @@ impl KeyFmApp {
             
             let res = if force_permanent {
                 let del_res = delete_permanently(path);
-                if del_res.is_ok() || del_res.as_ref().err().map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound) {
-                    if is_bin {
-                        if let Some(fname) = path.file_name() {
-                            let fname_str = fname.to_string_lossy();
-                            if fname_str.starts_with("$R") {
-                                let i_name = format!("$I{}", &fname_str[2..]);
-                                let i_path = path.with_file_name(i_name);
+                if is_bin {
+                    if let Some(fname) = path.file_name() {
+                        let fname_str = fname.to_string_lossy();
+                        if let Some(rest) = fname_str.strip_prefix("$R") {
+                            let i_path = path.with_file_name(format!("$I{}", rest));
+                            let r_gone = del_res.is_ok()
+                                || del_res.as_ref().err().map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound);
+                            if r_gone {
                                 let _ = delete_permanently(&i_path);
                             }
                         }
@@ -193,6 +194,8 @@ impl KeyFmApp {
                 "{} of {} item(s) not deleted: {}",
                 failed.len(), paths.len(), first_err.unwrap_or_default()
             );
+        } else {
+            self.status_msg.clear();
         }
     }
 
