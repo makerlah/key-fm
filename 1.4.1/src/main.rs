@@ -1811,6 +1811,8 @@ impl eframe::App for KeyFmApp {
                         let resp = ui.selectable_label(is_selected, format!("📌 {}", label));
                         if resp.clicked() {
                             navigate_to = Some(pin.clone());
+                            self.sidebar_focus = true;
+                            self.sidebar_idx = sb_counter - 1;
                         }
                         resp.context_menu(|ui| {
                             if ui.button("Open").clicked() {
@@ -1833,6 +1835,8 @@ impl eframe::App for KeyFmApp {
                     let resp = ui.selectable_label(is_selected, *label);
                     if resp.clicked() {
                         navigate_to = Some(path_str.clone());
+                        self.sidebar_focus = true;
+                        self.sidebar_idx = sb_counter - 1;
                     }
                     resp.context_menu(|ui| {
                         if ui.button("Open").clicked() {
@@ -1861,6 +1865,8 @@ impl eframe::App for KeyFmApp {
                     .clicked()
                 {
                     navigate_to = Some(THIS_PC.to_string());
+                    self.sidebar_focus = true;
+                    self.sidebar_idx = sb_counter - 1;
                 }
 
                 let drives_info_cache = self.drives_info_cache.clone();
@@ -1880,6 +1886,8 @@ impl eframe::App for KeyFmApp {
                         let text = format!("{} {:.1}%", label, usage);
                         if ui.selectable_label(is_selected, text).clicked() {
                             navigate_to = Some(path_str.clone());
+                            self.sidebar_focus = true;
+                            self.sidebar_idx = sb_counter - 1;
                         }
                     });
                 }
@@ -3335,7 +3343,9 @@ row.col(|ui| {
             match resolve_location(&raw, &self.cwd) {
                 Some(loc) => {
                     self.go_to(loc);
-                    self.selected_item = self.visible_indices().first().copied();
+                    if !self.sidebar_focus {
+                        self.selected_item = self.visible_indices().first().copied();
+                    }
                 }
                 None => {
                     self.status_msg = format!("Not a directory: {}", raw);
