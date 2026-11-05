@@ -1,8 +1,7 @@
 use crate::app::KeyFmApp;
 use crate::app::types::ClipItem;
 use crate::constants::{THIS_PC, RECYCLE, QUICK_ACCESS, VIRTUAL};
-use crate::helpers::{same_loc, unique_path, move_path, copy_any, delete_permanently,
-                     is_windows_hidden};
+use crate::helpers::{same_loc, unique_path, move_path, copy_any, delete_permanently, is_windows_hidden};
 use crate::drives;
 use crate::trash;
 use std::path::PathBuf;
@@ -47,8 +46,7 @@ impl KeyFmApp {
                 .unwrap_or_else(|| pin.clone());
             let size = if is_dir { 0 } else { meta.len() };
             let mtime = meta.modified().ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()
-                    .map(|d| d.as_secs_f64()));
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64()));
             seen.push(crate::helpers::norm(pin));
             self.entries.push(Item {
                 name, path, is_dir, size, mtime, hidden: false,
@@ -64,21 +62,16 @@ impl KeyFmApp {
             let Ok(meta) = path.metadata() else { continue };
             if !meta.is_dir() { continue; }
             let mtime = meta.modified().ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()
-                    .map(|d| d.as_secs_f64()));
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64()));
             self.entries.push(Item {
-                name: label.to_string(), path: path.clone(),
-                is_dir: true, size: 0, mtime, hidden: false,
+                name: label.to_string(), path: path.clone(), is_dir: true, size: 0, mtime, hidden: false,
                 extra: String::new(), orig: None, info: String::new(), total: 0,
             });
         }
     }
 
     pub(crate) fn copy_or_cut(&mut self, mode: &str) {
-        if self.cwd == THIS_PC
-            || self.cwd == QUICK_ACCESS
-            || (self.cwd == RECYCLE && mode == "cut")
-        {
+        if self.cwd == THIS_PC || self.cwd == QUICK_ACCESS || (self.cwd == RECYCLE && mode == "cut") {
             self.status_msg = "Not available in this view".to_string();
             return;
         }
@@ -144,7 +137,9 @@ impl KeyFmApp {
     }
 
     pub(crate) fn delete_selected(&mut self, permanent: bool) {
-        if self.is_virtual_view() {
+        let is_bin = self.cwd == RECYCLE;
+        
+        if self.is_virtual_view() && !is_bin {
             self.status_msg = "Cannot delete from this view".to_string();
             return;
         }
@@ -156,14 +151,34 @@ impl KeyFmApp {
         let mut failed: Vec<PathBuf> = Vec::new();
         let mut first_err: Option<String> = None;
         for (i, path) in paths.iter().enumerate() {
-            let res = if permanent { delete_permanently(path) } else { trash::move_to_trash(path) };
+            let force_permanent = permanent || is_bin;
+            
+            let res = if force_permanent {
+                let del_res = delete_permanently(path);
+                if del_res.is_ok() || del_res.as_ref().err().map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound) {
+                    if is_bin {
+                        if let Some(fname) = path.file_name() {
+                            let fname_str = fname.to_string_lossy();
+                            if fname_str.starts_with("$R") {
+                                let i_name = format!("$I{}", &fname_str[2..]);
+                                let i_path = path.with_file_name(i_name);
+                                let _ = delete_permanently(&i_path);
+                            }
+                        }
+                    }
+                }
+                del_res
+            } else {
+                trash::move_to_trash(path)
+            };
+            
             if let Err(e) = res {
                 if e.kind() == std::io::ErrorKind::Interrupted {
                     failed.extend(paths[i..].iter().cloned());
                     first_err.get_or_insert("cancelled".to_string());
                     break;
                 }
-                let what = if permanent { "Delete" } else { "Trash" };
+                let what = if force_permanent { "Delete" } else { "Trash" };
                 first_err.get_or_insert(format!("{} failed for \"{}\": {}", what, path.display(), e));
                 failed.push(path.clone());
             }
