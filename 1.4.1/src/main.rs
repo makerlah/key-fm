@@ -120,61 +120,88 @@ struct PickerEntry {
     name: String,
     path: PathBuf,
     is_dir: bool,
+    size: u64,
+    mtime: Option<f64>,
 }
 
 struct OpenWithState {
     target: PathBuf,
+    filter: String,
+    focus_filter: bool,
+    // "Choose another program" window
     picker_open: bool,
     picker_cwd: PathBuf,
     picker_entries: Vec<PickerEntry>,
     picker_selected: Option<usize>,
+    picker_filter: String,
+    picker_path_input: String,
+    picker_show_all: bool,
+    picker_hist: Vec<PathBuf>,
+    picker_fwd: Vec<PathBuf>,
+    picker_scroll_to: Option<usize>,
+    picker_set_offset: Option<f32>,
+    picker_focus_filter: bool,
 }
 
 impl OpenWithState {
     fn new(target: PathBuf) -> Self {
         Self {
             target,
+            filter: String::new(),
+            focus_filter: true,
             picker_open: false,
             picker_cwd: PathBuf::new(),
             picker_entries: Vec::new(),
             picker_selected: None,
+            picker_filter: String::new(),
+            picker_path_input: String::new(),
+            picker_show_all: false,
+            picker_hist: Vec::new(),
+            picker_fwd: Vec::new(),
+            picker_scroll_to: None,
+            picker_set_offset: None,
+            picker_focus_filter: false,
         }
     }
 
     fn start_picker(&mut self) {
         self.picker_open = true;
-        self.picker_selected = None;
-        self.picker_cwd = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_else(|| {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            });
+        self.picker_hist.clear();
+        self.picker_fwd.clear();
+        self.picker_filter.clear();
+        self.picker_cwd = default_picker_dir();
         self.reload_picker();
     }
 
     fn reload_picker(&mut self) {
         self.picker_entries.clear();
         self.picker_selected = None;
+        self.picker_scroll_to = None;
+        self.picker_set_offset = Some(0.0);
+        self.picker_path_input = self.picker_cwd.display().to_string();
         let Ok(rd) = std::fs::read_dir(&self.picker_cwd) else {
             return;
         };
         for entry in rd.flatten() {
             let path = entry.path();
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let meta = entry.metadata().ok();
             let is_dir = path.is_dir();
-            if !is_dir && !is_executable_candidate(&path) {
+            let hidden = (cfg!(unix) && name.starts_with('.'))
+                || keyfm::helpers::is_windows_hidden(meta.as_ref());
+            if hidden && !self.picker_show_all {
                 continue;
             }
-            self.picker_entries.push(PickerEntry {
-                name,
-                path,
-                is_dir,
-            });
+            if !is_dir && !self.picker_show_all && !is_executable_candidate(&path) {
+                continue;
+            }
+            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+            let mtime = meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs_f64());
+            self.picker_entries.push(PickerEntry { name, path, is_dir, size, mtime });
         }
         self.picker_entries.sort_by(|a, b| {
             b.is_dir
@@ -182,6 +209,70 @@ impl OpenWithState {
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
     }
+
+    fn picker_goto(&mut self, p: PathBuf) {
+        if p != self.picker_cwd {
+            let old = std::mem::replace(&mut self.picker_cwd, p);
+            if !old.as_os_str().is_empty() {
+                self.picker_hist.push(old);
+            }
+            self.picker_fwd.clear();
+        }
+        self.picker_filter.clear();
+        self.reload_picker();
+    }
+
+    fn picker_back(&mut self) {
+        if let Some(p) = self.picker_hist.pop() {
+            let old = std::mem::replace(&mut self.picker_cwd, p);
+            self.picker_fwd.push(old);
+            self.picker_filter.clear();
+            self.reload_picker();
+        }
+    }
+
+    fn picker_forward(&mut self) {
+        if let Some(p) = self.picker_fwd.pop() {
+            let old = std::mem::replace(&mut self.picker_cwd, p);
+            self.picker_hist.push(old);
+            self.picker_filter.clear();
+            self.reload_picker();
+        }
+    }
+
+    fn picker_up(&mut self) {
+        if let Some(parent) = self.picker_cwd.parent().map(|p| p.to_path_buf()) {
+            self.picker_goto(parent);
+        }
+    }
+}
+
+/// Where the "Choose another program" browser starts (not keyfm's own folder).
+fn default_picker_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(p) = std::env::var_os("ProgramFiles") {
+            let p = PathBuf::from(p);
+            if p.is_dir() {
+                return p;
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let p = PathBuf::from("/Applications");
+        if p.is_dir() {
+            return p;
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let p = PathBuf::from("/usr/bin");
+        if p.is_dir() {
+            return p;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn is_executable_candidate(path: &Path) -> bool {
@@ -193,7 +284,7 @@ fn is_executable_candidate(path: &Path) -> bool {
             .unwrap_or_default();
         matches!(
             ext.as_str(),
-            "exe" | "bat" | "cmd" | "com" | "msc" | "lnk" | "scr"
+            "exe" | "bat" | "cmd" | "com"
         )
     }
     #[cfg(not(windows))]
@@ -203,6 +294,439 @@ fn is_executable_candidate(path: &Path) -> bool {
             .map(|m| m.permissions().mode() & 0o111 != 0)
             .unwrap_or(false)
     }
+}
+
+struct PickerOutcome {
+    choose: Option<PathBuf>,
+    close: bool,
+}
+
+const PICKER_ROW_H: f32 = 24.0;
+
+/// Quick-access places shown in the program chooser's sidebar.
+fn picker_shortcuts(known: &[(&'static str, PathBuf)]) -> Vec<(String, PathBuf)> {
+    let mut v: Vec<(String, PathBuf)> = Vec::new();
+    #[cfg(windows)]
+    {
+        for (label, var, sub) in [
+            ("Program Files", "ProgramFiles", ""),
+            ("Program Files (x86)", "ProgramFiles(x86)", ""),
+            ("Local programs", "LOCALAPPDATA", "Programs"),
+        ] {
+            if let Some(base) = std::env::var_os(var) {
+                let mut p = PathBuf::from(base);
+                if !sub.is_empty() {
+                    p.push(sub);
+                }
+                v.push((label.to_string(), p));
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        v.push(("Applications".to_string(), PathBuf::from("/Applications")));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        v.push(("/usr/bin".to_string(), PathBuf::from("/usr/bin")));
+        v.push(("/usr/local/bin".to_string(), PathBuf::from("/usr/local/bin")));
+        v.push(("/opt".to_string(), PathBuf::from("/opt")));
+    }
+    for (label, path) in known {
+        v.push((label.to_string(), path.clone()));
+    }
+    v
+}
+
+/// The body of the "Open with…" program chooser, drawn in its own OS window.
+fn program_picker_ui(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    st: &mut OpenWithState,
+    icons: &mut IconCache,
+    theme: &Theme,
+    known: &[(&'static str, PathBuf)],
+    drives: &[(String, PathBuf, u64, u64)],
+    target_name: &str,
+) -> PickerOutcome {
+    let mut out = PickerOutcome { choose: None, close: false };
+    let ppp = ctx.pixels_per_point();
+
+    let mut goto: Option<PathBuf> = None;
+    let mut activate: Option<usize> = None;
+    let mut go_back = false;
+    let mut go_fwd = false;
+    let mut go_up = false;
+    let mut path_submit = false;
+    let mut reload = false;
+
+    // Rows that pass the live filter (indices into st.picker_entries).
+    let needle = st.picker_filter.trim().to_lowercase();
+    let visible: Vec<usize> = st
+        .picker_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| needle.is_empty() || e.name.to_lowercase().contains(&needle))
+        .map(|(i, _)| i)
+        .collect();
+
+    // ---- top bar: navigation, path, filter ----
+    egui::TopBottomPanel::top("pk_top").show_inside(ui, |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!st.picker_hist.is_empty(), egui::Button::new("←"))
+                .on_hover_text("Back (Alt+Left)")
+                .clicked()
+            {
+                go_back = true;
+            }
+            if ui
+                .add_enabled(!st.picker_fwd.is_empty(), egui::Button::new("→"))
+                .on_hover_text("Forward (Alt+Right)")
+                .clicked()
+            {
+                go_fwd = true;
+            }
+            if ui.button("↑").on_hover_text("Up (Backspace)").clicked() {
+                go_up = true;
+            }
+            let w = (ui.available_width() - 200.0).max(120.0);
+            let r = ui.add(egui::TextEdit::singleline(&mut st.picker_path_input).desired_width(w));
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                path_submit = true;
+            }
+            let f = ui.add(
+                egui::TextEdit::singleline(&mut st.picker_filter)
+                    .hint_text("Filter (Ctrl+F)")
+                    .desired_width(f32::INFINITY),
+            );
+            if st.picker_focus_filter {
+                f.request_focus();
+                st.picker_focus_filter = false;
+            }
+        });
+        ui.add_space(4.0);
+    });
+
+    // ---- bottom bar: selection + buttons ----
+    let sel_file: Option<PathBuf> = st
+        .picker_selected
+        .and_then(|i| st.picker_entries.get(i))
+        .filter(|e| !e.is_dir)
+        .map(|e| e.path.clone());
+    egui::TopBottomPanel::bottom("pk_bottom").show_inside(ui, |ui| {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let shown = sel_file
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "select a program".to_string());
+            ui.label(format!("Open \"{}\" with:", target_name));
+            ui.label(egui::RichText::new(shown).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Cancel").clicked() {
+                    out.close = true;
+                }
+                if ui
+                    .add_enabled(sel_file.is_some(), egui::Button::new("Open"))
+                    .clicked()
+                {
+                    out.choose = sel_file.clone();
+                }
+                if ui.checkbox(&mut st.picker_show_all, "All files").changed() {
+                    reload = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+    });
+
+    // ---- sidebar ----
+    let shortcuts = picker_shortcuts(known);
+    egui::SidePanel::left("pk_side")
+        .resizable(true)
+        .default_width(190.0)
+        .width_range(140.0..=320.0)
+        .show_inside(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(6.0);
+                ui.weak("Quick access");
+                for (label, path) in &shortcuts {
+                    if !path.is_dir() {
+                        continue;
+                    }
+                    let cur = same_loc(&st.picker_cwd.to_string_lossy(), &path.to_string_lossy());
+                    ui.horizontal(|ui| {
+                        let tex = icons.get(ctx, IconKind::Folder);
+                        draw_icon(ui, ppp, tex.as_ref(), true);
+                        if ui.selectable_label(cur, label.as_str()).clicked() {
+                            goto = Some(path.clone());
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+                ui.weak("Drives");
+                for (label, path, _, _) in drives {
+                    let cur = same_loc(&st.picker_cwd.to_string_lossy(), &path.to_string_lossy());
+                    ui.horizontal(|ui| {
+                        let tex = icons.get(ctx, IconKind::Drive(path));
+                        draw_icon(ui, ppp, tex.as_ref(), false);
+                        if ui.selectable_label(cur, label.as_str()).clicked() {
+                            goto = Some(path.clone());
+                        }
+                    });
+                }
+            });
+        });
+
+    // ---- file list ----
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        let font = egui::TextStyle::Body.resolve(ui.style());
+
+        // header
+        let (hr, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 22.0),
+            egui::Sense::hover(),
+        );
+        let size_right = hr.right() - 14.0;
+        let mod_left = size_right - 90.0 - 150.0;
+        let hp = ui.painter();
+        hp.text(
+            egui::pos2(hr.left() + 30.0, hr.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Name",
+            font.clone(),
+            theme.dim,
+        );
+        hp.text(
+            egui::pos2(mod_left, hr.center().y),
+            egui::Align2::LEFT_CENTER,
+            "Date modified",
+            font.clone(),
+            theme.dim,
+        );
+        hp.text(
+            egui::pos2(size_right, hr.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "Size",
+            font.clone(),
+            theme.dim,
+        );
+        hp.line_segment(
+            [hr.left_bottom(), hr.right_bottom()],
+            egui::Stroke::new(1.0_f32, theme.border),
+        );
+
+        if visible.is_empty() {
+            ui.add_space(12.0);
+            if st.picker_entries.is_empty() {
+                ui.weak("No programs or folders here. Tick \"All files\" to see everything.");
+            } else {
+                ui.weak("Nothing matches the filter.");
+            }
+            return;
+        }
+
+        let mut sa = egui::ScrollArea::vertical().auto_shrink([false, false]);
+        if let Some(off) = st.picker_set_offset.take() {
+            sa = sa.vertical_scroll_offset(off);
+        }
+        let res = sa.show_rows(ui, PICKER_ROW_H, visible.len(), |ui, range| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for row in range {
+                let i = visible[row];
+                let (name, path, is_dir, size, mtime) = {
+                    let e = &st.picker_entries[i];
+                    (e.name.clone(), e.path.clone(), e.is_dir, e.size, e.mtime)
+                };
+                let (rect, resp) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), PICKER_ROW_H),
+                    egui::Sense::click(),
+                );
+                let selected = st.picker_selected == Some(i);
+                let fg = if selected { theme.sel_fg } else { ui.visuals().text_color() };
+                let dim = if selected { theme.sel_fg } else { theme.dim };
+                let kind = if is_dir {
+                    IconKind::Folder
+                } else {
+                    IconKind::File { name: &name, path: &path }
+                };
+                let tex = icons.get(ctx, kind);
+
+                let painter = ui.painter();
+                if selected {
+                    painter.rect_filled(rect, 3.0, theme.sel_bg);
+                } else if resp.hovered() {
+                    painter.rect_filled(rect, 3.0, theme.hover);
+                }
+
+                let icon_size = tex
+                    .as_ref()
+                    .map(|t| t.size_vec2() / ppp)
+                    .unwrap_or_else(|| egui::vec2(16.0, 16.0));
+                let icon_rect = egui::Rect::from_center_size(
+                    egui::pos2(rect.left() + 16.0, rect.center().y),
+                    icon_size,
+                );
+                match tex.as_ref() {
+                    Some(t) => {
+                        painter.image(
+                            t.id(),
+                            icon_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    }
+                    None if is_dir => {
+                        painter.rect_filled(
+                            icon_rect.shrink2(egui::vec2(1.0, 3.0)),
+                            2.0,
+                            egui::Color32::from_rgb(0xf0, 0xc0, 0x4a),
+                        );
+                    }
+                    None => {}
+                }
+
+                let r_size = rect.right() - 14.0;
+                let r_mod = r_size - 90.0 - 150.0;
+                let name_clip = egui::Rect::from_min_max(
+                    egui::pos2(rect.left() + 30.0, rect.top()),
+                    egui::pos2(r_mod - 8.0, rect.bottom()),
+                );
+                painter.with_clip_rect(name_clip).text(
+                    egui::pos2(rect.left() + 30.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &name,
+                    font.clone(),
+                    fg,
+                );
+                painter.text(
+                    egui::pos2(r_mod, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    fmt_time(mtime),
+                    font.clone(),
+                    dim,
+                );
+                if !is_dir {
+                    painter.text(
+                        egui::pos2(r_size, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        human_size(size),
+                        font.clone(),
+                        dim,
+                    );
+                }
+
+                if resp.clicked() {
+                    st.picker_selected = Some(i);
+                }
+                if resp.double_clicked() {
+                    activate = Some(i);
+                }
+            }
+        });
+
+        // Keep a keyboard-selected row in view (rows off-screen are not drawn).
+        if let Some(pos) = st.picker_scroll_to.take() {
+            let top = res.state.offset.y;
+            let h = res.inner_rect.height();
+            let row_top = pos as f32 * PICKER_ROW_H;
+            if row_top < top {
+                st.picker_set_offset = Some(row_top);
+                ctx.request_repaint();
+            } else if row_top + PICKER_ROW_H > top + h {
+                st.picker_set_offset = Some(row_top + PICKER_ROW_H - h);
+                ctx.request_repaint();
+            }
+        }
+    });
+
+    // ---- keyboard ----
+    if !ctx.wants_keyboard_input() && !visible.is_empty() {
+        let cur_pos = st
+            .picker_selected
+            .and_then(|s| visible.iter().position(|&v| v == s));
+        let last = visible.len() - 1;
+        let mut new_pos: Option<usize> = None;
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            new_pos = Some(cur_pos.map_or(0, |p| (p + 1).min(last)));
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            new_pos = Some(cur_pos.map_or(0, |p| p.saturating_sub(1)));
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+            new_pos = Some(0);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+            new_pos = Some(last);
+        }
+        if let Some(np) = new_pos {
+            st.picker_selected = Some(visible[np]);
+            st.picker_scroll_to = Some(np);
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if let Some(s) = st.picker_selected {
+                activate = Some(s);
+            }
+        }
+    }
+    if !ctx.wants_keyboard_input() {
+        if ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
+            go_up = true;
+        }
+    }
+    if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowLeft)) {
+        go_back = true;
+    }
+    if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::ArrowRight)) {
+        go_fwd = true;
+    }
+    if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::F)) {
+        st.picker_focus_filter = true;
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        out.close = true;
+    }
+
+    // ---- apply what happened this frame ----
+    if reload {
+        st.reload_picker();
+    }
+    if path_submit {
+        let input = st.picker_path_input.trim().to_string();
+        let base = st.picker_cwd.clone();
+        if let Some(dir) = expand_and_validate_in(&input, &base) {
+            goto = Some(dir);
+        } else if Path::new(&input).is_file() {
+            out.choose = Some(PathBuf::from(&input));
+        } else {
+            st.picker_path_input = st.picker_cwd.display().to_string();
+        }
+    }
+    if let Some(i) = activate {
+        if let Some(e) = st.picker_entries.get(i) {
+            if e.is_dir {
+                goto = Some(e.path.clone());
+            } else {
+                out.choose = Some(e.path.clone());
+            }
+        }
+    }
+    if go_back {
+        st.picker_back();
+    }
+    if go_fwd {
+        st.picker_forward();
+    }
+    if go_up {
+        st.picker_up();
+    }
+    if let Some(p) = goto {
+        st.picker_goto(p);
+    }
+    out
 }
 
 struct KeyFmApp {
@@ -1250,47 +1774,6 @@ impl eframe::App for KeyFmApp {
                             ui.close_menu();
                         }
                     });
-                    ui.menu_button("Go", |ui| {
-                        if ui.button("Back").clicked() {
-                            nav_back = true;
-                            ui.close_menu();
-                        }
-                        if ui.button("Forward").clicked() {
-                            nav_forward = true;
-                            ui.close_menu();
-                        }
-                        if ui.button("Up").clicked() {
-                            navigate_to = self.parent_location();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button("This PC").clicked() {
-                            navigate_to = Some(THIS_PC.to_string());
-                            ui.close_menu();
-                        }
-                        if cfg!(windows) && ui.button("Recycle Bin").clicked() {
-                            navigate_to = Some(RECYCLE.to_string());
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        for (label, path) in &self.known_cache {
-                            let p = path.to_string_lossy().to_string();
-                            if VIRTUAL.contains(&p.as_str()) {
-                                continue;
-                            }
-                            if ui.button(*label).clicked() {
-                                navigate_to = Some(p);
-                                ui.close_menu();
-                            }
-                        }
-                        ui.separator();
-                        for (name, path, _, _) in &self.drives_info_cache {
-                            if ui.button(name).clicked() {
-                                navigate_to = Some(path.to_string_lossy().to_string());
-                                ui.close_menu();
-                            }
-                        }
-                    });
                 });
                 let menu_row_bottom = menu_row_top + TOPBAR_ROW_H;
 
@@ -1904,6 +2387,17 @@ impl eframe::App for KeyFmApp {
                 }
             }
 
+            // Ctrl+Shift+O: Open With… for the selected file
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::O)) {
+                if let Some(idx) = self.selected_item {
+                    if let Some(item) = self.rendered_entries().get(idx) {
+                        if !item.is_dir {
+                            pending_action = UiAction::OpenWith(item.path.clone());
+                        }
+                    }
+                }
+            }
+
             if ctx.input(|i| i.key_pressed(egui::Key::Backspace) && !i.modifiers.shift) {
                 let has_history =
                     self.tabs.get(self.cur_tab).map_or(false, |t| !t.back.is_empty());
@@ -2017,7 +2511,8 @@ impl eframe::App for KeyFmApp {
 
         // ---- Panel 5: file list ----
         egui::CentralPanel::default().show(ctx, |ui| {
-            let pointer_pos = ui.input(|i| i.pointer.interact_pos());
+            ui.style_mut().interaction.selectable_labels = false;
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos());
             let primary_down = ui.input(|i| i.pointer.primary_down());
             if ui.input(|i| i.pointer.primary_pressed()) {
                 let on_panel = pointer_pos
@@ -2055,7 +2550,7 @@ impl eframe::App for KeyFmApp {
                     let is_pc = self.cwd == THIS_PC;
                     let in_bin = self.cwd == RECYCLE;
                     let ppp = ctx.pixels_per_point();
-                    let row_h = if is_pc { 36.0 } else { 18.0 };
+                    let row_h = if is_pc { 36.0 } else { 24.0 };
                     let size_title = if is_pc {
                         pc_title_for("size").unwrap_or("")
                     } else {
@@ -2080,6 +2575,7 @@ impl eframe::App for KeyFmApp {
                     let mut size_drag = 0.0_f32;
                     let mut mod_drag = 0.0_f32;
                     let mut drag_stopped = false;
+                    let row_right = ui.max_rect().right();
                     let mut table = egui_extras::TableBuilder::new(ui)
                         .vscroll(false)
                         .column(egui_extras::Column::remainder().clip(true));
@@ -2186,10 +2682,22 @@ impl eframe::App for KeyFmApp {
                                 let is_pinned =
                                     self.config.pins.iter().any(|p| p == &pin_str);
 
-                                body.row(row_h, |mut row| {
+                                    body.row(row_h, |mut row| {
                                     row.col(|ui| {
+                                        ui.spacing_mut().interact_size.y = row_h;
+                                        // Make the row's hit/paint area span every column.
+                                        let cell_rect = ui.max_rect();
+                                        let row_rect = egui::Rect::from_min_max(
+                                            cell_rect.min,
+                                            egui::pos2(row_right, cell_rect.max.y),
+                                        );
+                                        let cell_clip = ui.clip_rect();
+                                        ui.set_clip_rect(egui::Rect::from_min_max(
+                                            cell_clip.min,
+                                            egui::pos2(row_right, cell_clip.max.y),
+                                        ));
                                         let response = ui.interact(
-                                            ui.max_rect(),
+                                            row_rect,
                                             ui.id().with(("row_sel", idx)),
                                             egui::Sense::click(),
                                         );
@@ -2203,6 +2711,7 @@ impl eframe::App for KeyFmApp {
                                                 }
                                             }
                                         }
+                                        ui.spacing_mut().interact_size.y = row_h;
                                         if self.selected_item == Some(idx)
                                             || self.selected_items.contains(&idx)
                                         {
@@ -2212,10 +2721,10 @@ impl eframe::App for KeyFmApp {
                                                 self.theme.sel_bg,
                                             );
                                         } else if response.hovered() {
-                                            stroke_rect(
-                                                ui.painter(),
+                                            ui.painter().rect_filled(
                                                 response.rect,
-                                                egui::Stroke::new(1.0_f32, self.theme.accent),
+                                                0.0,
+                                                self.theme.hover,
                                             );
                                         }
                                         if response.clicked() {
@@ -2238,6 +2747,7 @@ impl eframe::App for KeyFmApp {
                                             }
                                         }
 
+                                        ui.set_clip_rect(cell_clip);
                                         let visible = ui.is_rect_visible(ui.max_rect());
                                         ui.horizontal(|ui| {
                                             let tex = if visible {
@@ -2251,7 +2761,7 @@ impl eframe::App for KeyFmApp {
                                                 ui.weak(format!("  (from {})", o.display()));
                                             }
                                         });
-
+                                        
                                         response.context_menu(|ui| {
                                             if ui.button("Open").clicked() {
                                                 pending_action =
@@ -2330,71 +2840,65 @@ impl eframe::App for KeyFmApp {
                                             );
                                         });
                                     }
-
-                                    row.col(|ui| {
-                                        if self.selected_item == Some(idx)
-                                            || self.selected_items.contains(&idx)
-                                        {
-                                            ui.painter().rect_filled(
-                                                ui.max_rect(),
-                                                0.0,
-                                                self.theme.sel_bg,
-                                            );
-                                        }
-                                        if is_pc && item_total > 0 {
-                                            let used = item_total.saturating_sub(item_size);
-                                            let frac = (used as f32 / item_total as f32)
-                                                .clamp(0.0, 1.0);
-                                            let fill = if frac > 0.9 {
-                                                self.theme.danger
-                                            } else {
-                                                self.theme.accent
-                                            };
-                                            let track = self.theme.border;
-                                            ui.vertical(|ui| {
-                                                let w =
-                                                    (ui.available_width() - 12.0).max(60.0);
-                                                let (rect, _) = ui.allocate_exact_size(
-                                                    egui::vec2(w, 8.0),
-                                                    egui::Sense::hover(),
-                                                );
-                                                ui.painter().rect_filled(rect, 2.0, track);
-                                                let filled = egui::Rect::from_min_size(
-                                                    rect.min,
-                                                    egui::vec2(
-                                                        rect.width() * frac,
-                                                        rect.height(),
-                                                    ),
-                                                );
-                                                ui.painter().rect_filled(filled, 2.0, fill);
-                                                ui.label(format!(
-                                                    "{} free of {} ({:.0}% used)",
-                                                    human_size(item_size),
-                                                    human_size(item_total),
-                                                    frac * 100.0
-                                                ));
-                                            });
-                                        } else {
-                                            ui.label(size_str);
-                                        }
-                                    });
-
-                                    row.col(|ui| {
-                                        if self.selected_item == Some(idx)
-                                            || self.selected_items.contains(&idx)
-                                        {
-                                            ui.painter().rect_filled(
-                                                ui.max_rect(),
-                                                0.0,
-                                                self.theme.sel_bg,
-                                            );
-                                        }
-                                        ui.label(time_str);
-                                    });
-                                });
-                            }
-                        });
-
+row.col(|ui| {
+    ui.spacing_mut().interact_size.y = row_h;
+    if self.selected_item == Some(idx)
+        || self.selected_items.contains(&idx)
+    {
+        ui.painter().rect_filled(ui.max_rect(), 0.0, self.theme.sel_bg);
+    }
+    if is_pc && item_total > 0 {
+        let used = item_total.saturating_sub(item_size);
+        let frac = (used as f32 / item_total as f32).clamp(0.0, 1.0);
+        let fill = if frac > 0.9 {
+            self.theme.danger
+        } else {
+            self.theme.accent
+        };
+        let track = self.theme.border;
+        ui.vertical(|ui| {
+            let w = (ui.available_width() - 12.0).max(60.0);
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(w, 8.0),
+                egui::Sense::hover(),
+            );
+            ui.painter().rect_filled(rect, 2.0, track);
+            let filled = egui::Rect::from_min_size(
+                rect.min,
+                egui::vec2(rect.width() * frac, rect.height()),
+            );
+            ui.painter().rect_filled(filled, 2.0, fill);
+            ui.label(format!(
+                "{} free of {} ({:.0}% used)",
+                human_size(item_size),
+                human_size(item_total),
+                frac * 100.0
+            ));
+        });
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(size_str);
+        });
+    }
+});
+row.col(|ui| {
+    let r = ui.max_rect();
+    if self.selected_item == Some(idx)
+        || self.selected_items.contains(&idx)
+    {
+        ui.painter().rect_filled(r, 0.0, self.theme.sel_bg);
+    }
+    ui.painter().text(
+        egui::pos2(r.left() + 4.0, r.center().y),
+        egui::Align2::LEFT_CENTER,
+        &time_str,
+        egui::TextStyle::Body.resolve(ui.style()),
+        self.theme.dim,
+    );
+});
+});
+}
+});
                     if size_drag != 0.0 || mod_drag != 0.0 {
                         self.config.size_col_width =
                             (self.config.size_col_width + size_drag).clamp(60.0, 600.0);
@@ -2442,7 +2946,7 @@ impl eframe::App for KeyFmApp {
                 stroke_rect(
                     ui.painter(),
                     lr,
-                    egui::Stroke::new(1.0_f32, self.theme.accent),
+                    egui::Stroke::new(1.0_f32, self.theme.hover),
                 );
             }
             if ui.input(|i| i.pointer.primary_released()) {
@@ -2574,15 +3078,50 @@ impl eframe::App for KeyFmApp {
                         ui.add_space(6.0);
 
                         let apps = keyfm::apps::list_apps();
-                        if apps.is_empty() {
-                            ui.weak("No known applications available for this file type.");
-                        } else {
-                            for (name, exe) in &apps {
-                                if ui.button(name).clicked() {
-                                    launch_exe = Some(exe.clone());
-                                    close_dialog = true;
-                                }
+                        let filter_resp = ui.add(
+                            egui::TextEdit::singleline(&mut state.filter)
+                                .hint_text("Filter applications… (Enter opens the first match)")
+                                .desired_width(f32::INFINITY),
+                        );
+                        if state.focus_filter {
+                            filter_resp.request_focus();
+                            state.focus_filter = false;
+                        }
+                        ui.add_space(4.0);
+
+                        let needle = state.filter.trim().to_lowercase();
+                        let matches: Vec<&(String, String)> = apps
+                            .iter()
+                            .filter(|a| needle.is_empty() || a.0.to_lowercase().contains(&needle))
+                            .collect();
+
+                        if filter_resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
+                            if let Some(first) = matches.first() {
+                                launch_exe = Some(first.1.clone());
+                                close_dialog = true;
                             }
+                        }
+
+                        if apps.is_empty() {
+                            ui.weak("No installed applications found. Use \"Choose another program…\".");
+                        } else if matches.is_empty() {
+                            ui.weak("No applications match the filter.");
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    for app in &matches {
+                                        let btn = egui::Button::new(app.0.as_str())
+                                            .min_size(egui::vec2(ui.available_width(), 22.0));
+                                        if ui.add(btn).on_hover_text(app.1.as_str()).clicked() {
+                                            launch_exe = Some(app.1.clone());
+                                            close_dialog = true;
+                                        }
+                                    }
+                                });
                         }
 
                         ui.add_space(6.0);
@@ -2602,98 +3141,45 @@ impl eframe::App for KeyFmApp {
                 }
 
                 if state.picker_open {
-                    let mut go_up = false;
-                    let mut nav_pick: Option<PathBuf> = None;
-                    let mut use_selected = false;
+                    let vid = egui::ViewportId::from_hash_of("keyfm_program_picker");
+                    let builder = egui::ViewportBuilder::default()
+                        .with_title("Open with…")
+                        .with_inner_size([860.0, 560.0])
+                        .with_min_inner_size([560.0, 340.0]);
+                    let theme = self.theme;
+                    let icons = &mut self.icons;
+                    let known = &self.known_cache;
+                    let drives_c = &self.drives_info_cache;
+                    let mut outcome = PickerOutcome { choose: None, close: false };
 
-                    egui::Window::new("Choose Program")
-                        .collapsible(false)
-                        .resizable(true)
-                        .default_width(620.0)
-                        .default_height(460.0)
-                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                        .show(ctx, |ui| {
-                            ui.horizontal(|ui| {
-                                if ui.button("⬆").clicked() {
-                                    go_up = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(
-                                        state.picker_cwd.display().to_string(),
-                                    )
-                                    .monospace(),
-                                );
-                            });
-                            ui.separator();
-
-                            egui::ScrollArea::vertical()
-                                .max_height(320.0)
-                                .show(ui, |ui| {
-                                    if state.picker_entries.is_empty() {
-                                        ui.weak("(no executables or folders here)");
-                                    }
-                                    for (i, entry) in state.picker_entries.iter().enumerate() {
-                                        let icon = if entry.is_dir { "📁" } else { "📄" };
-                                        let label = format!("{} {}", icon, entry.name);
-                                        let selected = state.picker_selected == Some(i);
-                                        let resp = ui.selectable_label(selected, label);
-                                        if resp.clicked() {
-                                            state.picker_selected = Some(i);
-                                        }
-                                        if resp.double_clicked() {
-                                            if entry.is_dir {
-                                                nav_pick = Some(entry.path.clone());
-                                            } else {
-                                                launch_exe = Some(
-                                                    entry.path.to_string_lossy().to_string(),
-                                                );
-                                                close_dialog = true;
-                                            }
-                                        }
-                                    }
+                    ctx.show_viewport_immediate(vid, builder, |vctx, class| {
+                        icons.begin_frame();
+                        let mut body = |ui: &mut egui::Ui| -> PickerOutcome {
+                            program_picker_ui(
+                                ui, vctx, state, icons, &theme, known, drives_c, &target_name,
+                            )
+                        };
+                        if class == egui::ViewportClass::Embedded {
+                            egui::Window::new("Open with…")
+                                .default_size([780.0, 500.0])
+                                .show(vctx, |ui| {
+                                    outcome = body(ui);
                                 });
-
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                let can_use = state
-                                    .picker_selected
-                                    .and_then(|i| state.picker_entries.get(i))
-                                    .map(|e| !e.is_dir)
-                                    .unwrap_or(false);
-                                if ui
-                                    .add_enabled(can_use, egui::Button::new("Use selected"))
-                                    .clicked()
-                                {
-                                    use_selected = true;
-                                }
-                                if ui.button("Back").clicked() {
-                                    state.picker_open = false;
-                                }
-                                if ui.button("Cancel").clicked() {
-                                    close_dialog = true;
-                                }
+                        } else {
+                            egui::CentralPanel::default().show(vctx, |ui| {
+                                outcome = body(ui);
                             });
-                        });
+                        }
+                        if vctx.input(|i| i.viewport().close_requested()) {
+                            outcome.close = true;
+                        }
+                    });
 
-                    if go_up {
-                        if let Some(parent) = state.picker_cwd.parent() {
-                            nav_pick = Some(parent.to_path_buf());
-                        }
-                    }
-                    if let Some(p) = nav_pick {
-                        state.picker_cwd = p;
-                        state.reload_picker();
-                    }
-                    if use_selected {
-                        if let Some(i) = state.picker_selected {
-                            if let Some(entry) = state.picker_entries.get(i) {
-                                if !entry.is_dir {
-                                    launch_exe =
-                                        Some(entry.path.to_string_lossy().to_string());
-                                    close_dialog = true;
-                                }
-                            }
-                        }
+                    if let Some(p) = outcome.choose {
+                        launch_exe = Some(p.to_string_lossy().to_string());
+                        close_dialog = true;
+                    } else if outcome.close {
+                        state.picker_open = false;
                     }
                 }
 
@@ -2712,8 +3198,14 @@ impl eframe::App for KeyFmApp {
                 self.open_with = None;
                 if let Some(target) = target {
                     match keyfm::apps::launch_with(&exe, &target) {
-                        Ok(()) => self.status_msg = format!("Opened with {}", exe),
-                        Err(e) => self.status_msg = format!("Launch failed: {}", e),
+                        Ok(()) => {
+                            let app = Path::new(&exe)
+                                .file_stem()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| exe.clone());
+                            self.status_msg = format!("Opened with {}", app);
+                        }
+                        Err(e) => self.status_msg = format!("Could not launch {}: {}", exe, e),
                     }
                 }
             } else if close_dialog {
