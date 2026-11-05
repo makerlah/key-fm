@@ -27,7 +27,7 @@ fn sel_fill(theme: &Theme, ui: &egui::Ui) -> egui::Color32 {
         if theme.bg.r() > 128 {
             egui::Color32::from_rgb(0xD9, 0xD9, 0xD9)
         } else {
-            egui::Color32::from_rgb(0x4A, 0x4A, 0x4A)
+            egui::Color32::from_rgb(0x5E, 0x5A, 0x5A)
         }
     } else {
         theme.sel_bg
