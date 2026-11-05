@@ -276,9 +276,12 @@ impl KeyFmApp {
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) { self.copy_or_cut("copy"); }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::X)) { self.copy_or_cut("cut"); }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::V)) { self.paste(); }
-            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::Delete)) {
+            // Shift+Delete → delete permanently (files) / delete from bin
+            if ctx.input(|i| i.modifiers.shift && !i.modifiers.ctrl && i.key_pressed(egui::Key::Delete)) {
                 self.delete_selected(true);
-            } else if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
+            }
+            // Plain Delete → move to bin / delete from bin
+            else if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
                 self.delete_selected(false);
             }
             if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::D)) {

@@ -138,30 +138,38 @@ impl KeyFmApp {
 
     pub(crate) fn delete_selected(&mut self, permanent: bool) {
         let is_bin = self.cwd == RECYCLE;
-        
         if self.is_virtual_view() && !is_bin {
             self.status_msg = "Cannot delete from this view".to_string();
             return;
         }
+
         let src: &[Item] = if self.search_active() { &self.search_results } else { &self.entries };
+        // Snapshot paths once — targets() uses indices into rendered_entries(),
+        // which must not be mutated until we're finished.
         let paths: Vec<PathBuf> = self.targets().into_iter()
-            .filter_map(|i| src.get(i).map(|e| e.path.clone())).collect();
+            .filter_map(|i| src.get(i).map(|e| e.path.clone()))
+            .collect();
         if paths.is_empty() { return; }
 
         let mut failed: Vec<PathBuf> = Vec::new();
         let mut first_err: Option<String> = None;
+        let mut ok_count = 0usize;
+
         for (i, path) in paths.iter().enumerate() {
             let force_permanent = permanent || is_bin;
-            
+
             let res = if force_permanent {
                 let del_res = delete_permanently(path);
+
+                // Best-effort $I companion cleanup for Recycle Bin items.
                 if is_bin {
                     if let Some(fname) = path.file_name() {
                         let fname_str = fname.to_string_lossy();
                         if let Some(rest) = fname_str.strip_prefix("$R") {
                             let i_path = path.with_file_name(format!("$I{}", rest));
                             let r_gone = del_res.is_ok()
-                                || del_res.as_ref().err().map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound);
+                                || del_res.as_ref().err()
+                                    .map_or(false, |e| e.kind() == std::io::ErrorKind::NotFound);
                             if r_gone {
                                 let _ = delete_permanently(&i_path);
                             }
@@ -172,30 +180,42 @@ impl KeyFmApp {
             } else {
                 trash::move_to_trash(path)
             };
-            
-            if let Err(e) = res {
-                if e.kind() == std::io::ErrorKind::Interrupted {
+
+            match res {
+                Ok(()) => ok_count += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
                     failed.extend(paths[i..].iter().cloned());
                     first_err.get_or_insert("cancelled".to_string());
                     break;
                 }
-                let what = if force_permanent { "Delete" } else { "Trash" };
-                first_err.get_or_insert(format!("{} failed for \"{}\": {}", what, path.display(), e));
-                failed.push(path.clone());
+                Err(e) => {
+                    let what = if force_permanent { "Delete" } else { "Trash" };
+                    first_err.get_or_insert(format!("{} failed for \"{}\": {}", what, path.display(), e));
+                    failed.push(path.clone());
+                }
             }
         }
+
         self.refresh_dir();
-        if !failed.is_empty() {
+
+        if failed.is_empty() {
+            // Explicit success feedback so a stale error doesn't linger.
+            self.status_msg = if ok_count == 1 {
+                String::new()
+            } else {
+                format!("Deleted {} items", ok_count)
+            };
+        } else {
             let sel: Vec<usize> = self.rendered_entries().iter().enumerate()
-                .filter(|(_, e)| failed.contains(&e.path)).map(|(i, _)| i).collect();
+                .filter(|(_, e)| failed.contains(&e.path))
+                .map(|(i, _)| i)
+                .collect();
             self.selected_item = sel.first().copied();
             self.selected_items = sel;
             self.status_msg = format!(
                 "{} of {} item(s) not deleted: {}",
                 failed.len(), paths.len(), first_err.unwrap_or_default()
             );
-        } else {
-            self.status_msg.clear();
         }
     }
 

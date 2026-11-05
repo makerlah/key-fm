@@ -21,8 +21,14 @@ impl KeyFmApp {
                 let on_panel = pointer_pos
                     .map(|p| ui.max_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id()))
                     .unwrap_or(false);
-                if on_panel { self.lasso_start = pointer_pos; self.selected_items.clear(); }
-                else { self.lasso_start = None; }
+                let with_mod = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+                if on_panel && !with_mod {
+                    self.lasso_start = pointer_pos;
+                    self.selected_items.clear();
+                    self.selected_item = None;
+                } else {
+                    self.lasso_start = None;
+                }
             }
             let lasso_rect: Option<egui::Rect> = if primary_down {
                 match (self.lasso_start, pointer_pos) {
@@ -136,7 +142,28 @@ impl KeyFmApp {
                                     } else if response.hovered() {
                                         ui.painter().rect_filled(response.rect, 0.0, self.theme.hover);
                                     }
-                                    if response.clicked() { self.selected_item = Some(idx); }
+                                    if response.clicked() {
+                                        if ui.input(|i| i.modifiers.ctrl) {
+                                            if !self.selected_items.contains(&idx) {
+                                                self.selected_items.push(idx);
+                                            } else {
+                                                self.selected_items.retain(|&x| x != idx);
+                                            }
+                                            self.selected_item = Some(idx);
+                                        } else if ui.input(|i| i.modifiers.shift) {
+                                            let anchor = self.selected_item.unwrap_or(idx);
+                                            let (lo, hi) = if anchor <= idx { (anchor, idx) } else { (idx, anchor) };
+                                            for k in lo..=hi {
+                                                if !self.selected_items.contains(&k) {
+                                                    self.selected_items.push(k);
+                                                }
+                                            }
+                                            self.selected_item = Some(idx);
+                                        } else {
+                                            self.selected_items.clear();
+                                            self.selected_item = Some(idx);
+                                        }
+                                    }
                                     if response.secondary_clicked() {
                                         if !self.selected_items.contains(&idx) { self.selected_items.clear(); }
                                         self.selected_item = Some(idx);

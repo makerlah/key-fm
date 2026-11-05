@@ -166,9 +166,10 @@ fn clear_readonly_recursive(path: &Path) -> io::Result<()> {
         let _ = std::fs::set_permissions(path, perms);
     }
     if meta.is_dir() && !meta.file_type().is_symlink() {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let _ = clear_readonly_recursive(&entry.path());
+        if let Ok(rd) = std::fs::read_dir(path) {
+            for entry in rd.flatten() {
+                let _ = clear_readonly_recursive(&entry.path());
+            }
         }
     }
     Ok(())
