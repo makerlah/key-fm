@@ -114,6 +114,97 @@ enum UiAction {
     Refresh,
 }
 
+// ---------- Open With support ----------
+
+struct PickerEntry {
+    name: String,
+    path: PathBuf,
+    is_dir: bool,
+}
+
+struct OpenWithState {
+    target: PathBuf,
+    picker_open: bool,
+    picker_cwd: PathBuf,
+    picker_entries: Vec<PickerEntry>,
+    picker_selected: Option<usize>,
+}
+
+impl OpenWithState {
+    fn new(target: PathBuf) -> Self {
+        Self {
+            target,
+            picker_open: false,
+            picker_cwd: PathBuf::new(),
+            picker_entries: Vec::new(),
+            picker_selected: None,
+        }
+    }
+
+    fn start_picker(&mut self) {
+        self.picker_open = true;
+        self.picker_selected = None;
+        self.picker_cwd = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            });
+        self.reload_picker();
+    }
+
+    fn reload_picker(&mut self) {
+        self.picker_entries.clear();
+        self.picker_selected = None;
+        let Ok(rd) = std::fs::read_dir(&self.picker_cwd) else {
+            return;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let is_dir = path.is_dir();
+            if !is_dir && !is_executable_candidate(&path) {
+                continue;
+            }
+            self.picker_entries.push(PickerEntry {
+                name,
+                path,
+                is_dir,
+            });
+        }
+        self.picker_entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+    }
+}
+
+fn is_executable_candidate(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        matches!(
+            ext.as_str(),
+            "exe" | "bat" | "cmd" | "com" | "msc" | "lnk" | "scr"
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+}
+
 struct KeyFmApp {
     config: Config,
     theme: Theme,
@@ -144,6 +235,7 @@ struct KeyFmApp {
     search_truncated: bool,
     last_search_query: String,
     show_shortcuts: bool,
+    open_with: Option<OpenWithState>,
 }
 
 impl KeyFmApp {
@@ -194,6 +286,7 @@ impl KeyFmApp {
             search_running: false,
             search_truncated: false,
             last_search_query: String::new(),
+            open_with: None,
         };
         app.refresh_dir();
         if let Some(n) = config_notice {
@@ -206,7 +299,10 @@ impl KeyFmApp {
         if let Some(tab) = self.tabs.get_mut(self.cur_tab) {
             tab.cwd = Some(std::path::PathBuf::from(&self.cwd));
             tab.search_query = self.search_query.clone();
-            tab.focus = self.selected_item.and_then(|idx| self.entries.get(idx)).map(|item| item.path.clone());
+            tab.focus = self
+                .selected_item
+                .and_then(|idx| self.entries.get(idx))
+                .map(|item| item.path.clone());
         }
     }
 
@@ -324,7 +420,11 @@ impl KeyFmApp {
         let mut skipped: Option<String> = None;
         loop {
             let popped = self.tabs.get_mut(self.cur_tab).and_then(|t| {
-                if forward { t.fwd.pop() } else { t.back.pop() }
+                if forward {
+                    t.fwd.pop()
+                } else {
+                    t.back.pop()
+                }
             });
             match popped {
                 Some(c) => {
@@ -412,7 +512,10 @@ impl KeyFmApp {
     }
 
     fn modal_open(&self) -> bool {
-        self.active_dialog.is_some() || self.confirm_empty_bin || self.show_shortcuts
+        self.active_dialog.is_some()
+            || self.confirm_empty_bin
+            || self.show_shortcuts
+            || self.open_with.is_some()
     }
 
     fn rendered_entries(&self) -> &[Item] {
@@ -477,7 +580,10 @@ impl KeyFmApp {
                         .or_else(|| item.path.file_name())
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| item.name.clone());
-                    self.clipboard.push(ClipItem { path: item.path.clone(), name });
+                    self.clipboard.push(ClipItem {
+                        path: item.path.clone(),
+                        name,
+                    });
                 }
             }
             self.clip_mode = mode.to_string();
@@ -574,7 +680,12 @@ impl KeyFmApp {
                     break;
                 }
                 let what = if permanent { "Delete" } else { "Trash" };
-                first_err.get_or_insert(format!("{} failed for \"{}\": {}", what, path.display(), e));
+                first_err.get_or_insert(format!(
+                    "{} failed for \"{}\": {}",
+                    what,
+                    path.display(),
+                    e
+                ));
                 failed.push(path.clone());
             }
         }
@@ -671,31 +782,49 @@ impl KeyFmApp {
         }
         let is_virtual = self.is_virtual_view();
         let path = Path::new(&self.cwd);
-        let read_dir_res = if is_virtual { None } else { Some(std::fs::read_dir(path)) };
+        let read_dir_res = if is_virtual {
+            None
+        } else {
+            Some(std::fs::read_dir(path))
+        };
         if let Some(Err(e)) = &read_dir_res {
             self.status_msg = format!("Cannot read {}: {}", self.cwd, e);
         }
         if let Some(Ok(read_dir)) = read_dir_res {
             for entry in read_dir.flatten() {
                 let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 let metadata = entry.metadata().ok();
                 let hidden = name.starts_with('.')
                     || keyfm::helpers::is_windows_hidden(metadata.as_ref());
                 if !self.config.show_hidden && hidden {
                     continue;
                 }
-                let is_link = metadata.as_ref().map_or(false, |m| m.file_type().is_symlink());
+                let is_link = metadata
+                    .as_ref()
+                    .map_or(false, |m| m.file_type().is_symlink());
                 let metadata = if is_link {
                     std::fs::metadata(&path).ok().or(metadata)
                 } else {
                     metadata
                 };
                 let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-                let size = metadata.as_ref().map(|m| if is_dir { 0 } else { m.len() }).unwrap_or(0);
-                let mtime = metadata.as_ref().and_then(|m| m.modified().ok()).and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
-                });
+                let size = metadata
+                    .as_ref()
+                    .map(|m| if is_dir { 0 } else { m.len() })
+                    .unwrap_or(0);
+                let mtime = metadata
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| {
+                        t.duration_since(std::time::UNIX_EPOCH)
+                            .ok()
+                            .map(|d| d.as_secs_f64())
+                    });
 
                 self.entries.push(Item {
                     name,
@@ -723,8 +852,7 @@ impl KeyFmApp {
         self.selected_items.clear();
 
         if keep_selection {
-            self.selected_item = kept_item
-                .and_then(|p| self.entries.iter().position(|e| e.path == p));
+            self.selected_item = kept_item.and_then(|p| self.entries.iter().position(|e| e.path == p));
             self.selected_items = self
                 .entries
                 .iter()
@@ -827,7 +955,7 @@ impl eframe::App for KeyFmApp {
             }
         }
 
-        // ---- Theme (unchanged) ----
+        // ---- Theme ----
         let mut visuals = if self.config.dark {
             egui::Visuals::dark()
         } else {
@@ -848,7 +976,42 @@ impl eframe::App for KeyFmApp {
         visuals.selection.stroke.color = self.theme.fg;
         ctx.set_visuals(visuals);
 
-        // ---- Panel 1: tab bar (full width, top) ----
+                // --- MODERN WINDOWS 11 STYLING ---
+        let mut style = (*ctx.style()).clone();
+        
+        // 1. Rounding (Windows 11 uses 8px for windows/menus, 4px for buttons)
+        style.visuals.window_rounding = 8.0.into();
+        style.visuals.menu_rounding = 8.0.into();
+        style.visuals.widgets.noninteractive.rounding = 4.0.into();
+        style.visuals.widgets.inactive.rounding = 4.0.into();
+        style.visuals.widgets.hovered.rounding = 4.0.into();
+        style.visuals.widgets.active.rounding = 4.0.into();
+
+        // 2. Shadows (Gives depth to dialogs)
+        style.visuals.window_shadow = egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 8.0),
+            blur: 24.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(60),
+        };
+        style.visuals.popup_shadow = egui::epaint::Shadow {
+            offset: egui::vec2(0.0, 4.0),
+            blur: 12.0,
+            spread: 0.0,
+            color: egui::Color32::from_black_alpha(40),
+        };
+
+        // 3. Spacing (Windows 11 feels much less cramped than default egui)
+        style.spacing.item_spacing = egui::vec2(8.0, 8.0); // More breathing room
+        style.spacing.button_padding = egui::vec2(12.0, 6.0); // Bigger buttons
+        style.spacing.interact_size.y = 32.0; // Taller clickable areas (standard Win11 height)
+
+        // 4. Window margins
+        style.spacing.window_margin = egui::Margin::same(16.0);
+        
+        ctx.set_style(style);
+
+        // ---- Panel 1: tab bar ----
         egui::TopBottomPanel::top("tab_bar")
             .frame(egui::Frame::default().fill(self.theme.bg))
             .show(ctx, |ui| {
@@ -879,14 +1042,21 @@ impl eframe::App for KeyFmApp {
                         let display_text = format!("\u{1F4C1}  {}", title);
                         let font_id = egui::FontId::proportional(13.0);
                         let text_color = if is_active { theme.fg } else { theme.dim };
-                        let galley = ui.painter().layout_no_wrap(display_text, font_id, text_color);
+                        let galley =
+                            ui.painter()
+                                .layout_no_wrap(display_text, font_id, text_color);
                         let text_w = galley.size().x.min(220.0);
                         let tab_width = (text_w + padding * 2.0 + close_w).max(150.0);
                         let (rect, response) = ui.allocate_exact_size(
                             egui::vec2(tab_width, tab_height),
                             egui::Sense::click(),
                         );
-                        let rounding = egui::Rounding { nw: 8.0, ne: 8.0, sw: 0.0, se: 0.0 };
+                        let rounding = egui::Rounding {
+                            nw: 8.0,
+                            ne: 8.0,
+                            sw: 0.0,
+                            se: 0.0,
+                        };
                         let bg = if is_active { theme.tab_sel } else { theme.tab };
                         ui.painter().rect_filled(rect, rounding, bg);
                         if response.hovered() && !is_active {
@@ -919,7 +1089,9 @@ impl eframe::App for KeyFmApp {
                                 stroke,
                             );
                             if response.clicked() {
-                                let pos = response.interact_pointer_pos().unwrap_or(rect.center());
+                                let pos = response
+                                    .interact_pointer_pos()
+                                    .unwrap_or(rect.center());
                                 if close_rect.contains(pos) {
                                     close_tab_idx = Some(i);
                                 } else if !is_active {
@@ -930,7 +1102,9 @@ impl eframe::App for KeyFmApp {
                             switch_to_tab = Some(i);
                         }
                         if let Some(p) = tab.cwd.as_ref() {
-                            response.clone().on_hover_text(p.to_string_lossy().to_string());
+                            response
+                                .clone()
+                                .on_hover_text(p.to_string_lossy().to_string());
                         }
                     }
 
@@ -942,14 +1116,22 @@ impl eframe::App for KeyFmApp {
                     if plus_response.hovered() {
                         ui.painter().rect_filled(plus_rect, 6.0, theme.hover);
                     }
-                    let plus_color = if plus_response.hovered() { theme.fg } else { theme.dim };
+                    let plus_color = if plus_response.hovered() {
+                        theme.fg
+                    } else {
+                        theme.dim
+                    };
                     let c = plus_rect.center();
                     let h = 5.0;
                     let stroke = egui::Stroke::new(1.5_f32, plus_color);
-                    ui.painter()
-                        .line_segment([egui::pos2(c.x - h, c.y), egui::pos2(c.x + h, c.y)], stroke);
-                    ui.painter()
-                        .line_segment([egui::pos2(c.x, c.y - h), egui::pos2(c.x, c.y + h)], stroke);
+                    ui.painter().line_segment(
+                        [egui::pos2(c.x - h, c.y), egui::pos2(c.x + h, c.y)],
+                        stroke,
+                    );
+                    ui.painter().line_segment(
+                        [egui::pos2(c.x, c.y - h), egui::pos2(c.x, c.y + h)],
+                        stroke,
+                    );
                     if plus_response.clicked() {
                         new_tab_clicked = true;
                     }
@@ -969,7 +1151,7 @@ impl eframe::App for KeyFmApp {
                 ui.add_space(4.0);
             });
 
-        // ---- Panel 2: sidebar (left) — menus at top, then quick access ----
+        // ---- Panel 2: sidebar ----
         let sidebar_inner = egui::SidePanel::left("sidebar")
             .resizable(true)
             .default_width(self.config.sidebar_width)
@@ -979,7 +1161,6 @@ impl eframe::App for KeyFmApp {
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
 
-                // ----- Menu row -----
                 ui.add_space(PANEL_PAD_TOP);
                 let menu_row_top = ui.cursor().top();
                 ui.horizontal(|ui| {
@@ -1001,8 +1182,7 @@ impl eframe::App for KeyFmApp {
                             ui.close_menu();
                         }
                         if ui.button("New File").clicked() {
-                            self.active_dialog =
-                                Some(("NewFile".to_string(), "".to_string()));
+                            self.active_dialog = Some(("NewFile".to_string(), "".to_string()));
                             ui.close_menu();
                         }
                         if ui.button("Empty Recycle Bin").clicked() {
@@ -1045,13 +1225,24 @@ impl eframe::App for KeyFmApp {
                         }
                     });
                     ui.menu_button("View", |ui| {
-                        if ui.checkbox(&mut self.config.dark, "Dark mode (Ctrl+Shift+D)").changed() {
+                        if ui
+                            .checkbox(&mut self.config.dark, "Dark mode (Ctrl+Shift+D)")
+                            .changed()
+                        {
                             self.theme = if self.config.dark { DARK } else { LIGHT };
                             self.save_cfg();
                         }
-                        if ui.checkbox(&mut self.config.show_hidden, "Show hidden files").changed() {
+                        if ui
+                            .checkbox(&mut self.config.show_hidden, "Show hidden files")
+                            .changed()
+                        {
                             self.save_cfg();
                             self.refresh_keep_selection();
+                        }
+                        ui.separator();
+                        if ui.button("Keyboard Shortcuts (F1)").clicked() {
+                            self.show_shortcuts = true;
+                            ui.close_menu();
                         }
                         ui.separator();
                         if ui.button("Refresh").clicked() {
@@ -1103,7 +1294,6 @@ impl eframe::App for KeyFmApp {
                 });
                 let menu_row_bottom = menu_row_top + TOPBAR_ROW_H;
 
-                // ----- Separators (horizontal under menus, vertical on right edge) -----
                 let sep = egui::Stroke::new(1.0_f32, self.theme.border);
                 ui.painter().line_segment(
                     [
@@ -1120,7 +1310,6 @@ impl eframe::App for KeyFmApp {
                     sep,
                 );
 
-                // ----- Sidebar content (unchanged) -----
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("Quick access").strong().color(self.theme.dim));
 
@@ -1215,9 +1404,15 @@ impl eframe::App for KeyFmApp {
             self.save_cfg();
         }
 
-        // ---- Panel 3: toolbar (top of the right area) ----
-        let can_back = self.tabs.get(self.cur_tab).map_or(false, |t| !t.back.is_empty());
-        let can_fwd = self.tabs.get(self.cur_tab).map_or(false, |t| !t.fwd.is_empty());
+        // ---- Panel 3: toolbar ----
+        let can_back = self
+            .tabs
+            .get(self.cur_tab)
+            .map_or(false, |t| !t.back.is_empty());
+        let can_fwd = self
+            .tabs
+            .get(self.cur_tab)
+            .map_or(false, |t| !t.fwd.is_empty());
         let can_up = self.parent_location().is_some();
         egui::TopBottomPanel::top("toolbar")
             .frame(egui::Frame::default().fill(self.theme.bg))
@@ -1230,10 +1425,16 @@ impl eframe::App for KeyFmApp {
                     ui.set_max_height(TOPBAR_ROW_H);
                     ui.add_space(PANEL_PAD_X);
 
-                    if ui.add_enabled(can_back, egui::Button::new("Back")).clicked() {
+                    if ui
+                        .add_enabled(can_back, egui::Button::new("Back"))
+                        .clicked()
+                    {
                         nav_back = true;
                     }
-                    if ui.add_enabled(can_fwd, egui::Button::new("Forward")).clicked() {
+                    if ui
+                        .add_enabled(can_fwd, egui::Button::new("Forward"))
+                        .clicked()
+                    {
                         nav_forward = true;
                     }
                     if ui.add_enabled(can_up, egui::Button::new("Up")).clicked() {
@@ -1248,9 +1449,11 @@ impl eframe::App for KeyFmApp {
                         ui.add_space(PANEL_PAD_X);
                         let search_resp = ui.add_sized(
                             [200.0, 20.0],
-                            egui::TextEdit::singleline(&mut self.search_query).hint_text("Search")
+                            egui::TextEdit::singleline(&mut self.search_query).hint_text("Search"),
                         );
-                        if search_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        if search_resp.has_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                        {
                             self.search_query.clear();
                         }
                     });
@@ -1267,7 +1470,7 @@ impl eframe::App for KeyFmApp {
                 );
             });
 
-        // ---- Keyboard handling (unchanged) ----
+        // ---- F1: shortcuts ----
         if ctx.input(|i| i.key_pressed(egui::Key::F1)) {
             self.show_shortcuts = !self.show_shortcuts;
         }
@@ -1276,77 +1479,154 @@ impl eframe::App for KeyFmApp {
             let dim_color = self.theme.dim;
             let mut is_open = true;
             let mut close_clicked = false;
-            let add_row = |ui: &mut egui::Ui, label: &str, keys: &str| {
-                ui.label(label);
-                ui.label(egui::RichText::new(keys).color(dim_color));
-                ui.end_row();
-            };
+
+            struct Section {
+                title: &'static str,
+                rows: &'static [(&'static str, &'static str)],
+            }
+            let sections: &[Section] = &[
+                Section {
+                    title: "Tabs",
+                    rows: &[
+                        ("New tab", "Ctrl+T"),
+                        ("Close tab", "Ctrl+W"),
+                        ("Next tab", "Ctrl+Tab / Ctrl+PgDn"),
+                        ("Previous tab", "Ctrl+Shift+Tab / Ctrl+PgUp"),
+                        ("Go to tab 1-9", "Alt+1 … Alt+9"),
+                    ],
+                },
+                Section {
+                    title: "Files",
+                    rows: &[
+                        ("Select all", "Ctrl+A"),
+                        ("Copy", "Ctrl+C"),
+                        ("Cut", "Ctrl+X"),
+                        ("Paste", "Ctrl+V"),
+                        ("Rename", "F2"),
+                        ("Delete to bin", "Delete"),
+                        ("Delete permanently", "Shift+Delete"),
+                        ("New file", "Ctrl+N"),
+                        ("New folder", "Ctrl+Shift+N"),
+                        ("Open with…", "Right-click → Open With"),
+                    ],
+                },
+                Section {
+                    title: "Navigation",
+                    rows: &[
+                        ("Open / enter folder", "Enter / Right"),
+                        ("Up one folder", "Backspace / Left"),
+                        ("Back", "Left / Alt+Left"),
+                        ("Forward", "Alt+Right"),
+                        ("Home folder", "Alt+Home"),
+                        ("This PC", "Ctrl+Shift+M"),
+                        ("Recycle Bin", "Ctrl+Shift+B"),
+                        ("First item", "Home"),
+                        ("Last item", "End"),
+                        ("Page up", "PgUp"),
+                        ("Page down", "PgDn"),
+                    ],
+                },
+                Section {
+                    title: "Quick access",
+                    rows: &[("Pin / unpin folder", "Ctrl+P")],
+                },
+                Section {
+                    title: "View",
+                    rows: &[
+                        ("Toggle hidden files", "Ctrl+H"),
+                        ("Dark / light mode", "Ctrl+Shift+D"),
+                        ("Sort by name", "Ctrl+1"),
+                        ("Sort by size", "Ctrl+2"),
+                        ("Sort by date", "Ctrl+3"),
+                        ("Refresh", "F5 / Ctrl+R"),
+                    ],
+                },
+                Section {
+                    title: "Fixed keys",
+                    rows: &[
+                        ("Up / Down", "Move selection"),
+                        ("Shift+Up / Shift+Down", "Extend selection"),
+                        ("Space", "Toggle selection"),
+                        ("Esc", "Clear / close"),
+                        ("Click + drag", "Lasso select"),
+                        ("F1", "Toggle this help"),
+                        ("Ctrl+Q", "Quit"),
+                    ],
+                },
+            ];
 
             egui::Window::new("Keyboard Shortcuts")
                 .open(&mut is_open)
                 .collapsible(false)
                 .resizable(true)
+                .default_width(1100.0)
+                .min_width(400.0)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .default_width(500.0)
                 .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().max_height(600.0).show(ui, |ui| {
-                        egui::Grid::new("shortcuts_grid").num_columns(2).spacing([40.0, 4.0]).striped(true).show(ui, |ui| {
-                            ui.heading("Tabs"); ui.end_row();
-                            add_row(ui, "New tab", "Ctrl+T");
-                            add_row(ui, "Close tab", "Ctrl+W");
-                            add_row(ui, "Next tab", "Ctrl+Tab, Ctrl+PgDn");
-                            add_row(ui, "Previous tab", "Ctrl+Shift+Tab, Ctrl+PgUp");
-                            add_row(ui, "Go to tab 1-9", "Alt+1 ... Alt+9");
+                    // Read width from the Window body BEFORE the ScrollArea.
+                    // Thresholds are deliberately low so that a display with
+                    // 150% scaling (which halves reported width in logical
+                    // points) still gets 2+ columns.
+                    let avail = ui.available_width();
+                    let num_cols = if avail >= 850.0 {
+                        3
+                    } else if avail >= 500.0 {
+                        2
+                    } else {
+                        1
+                    };
+                    let per_col: &[usize] = match num_cols {
+                        3 => &[2, 2, 2],
+                        2 => &[3, 3],
+                        _ => &[6],
+                    };
 
-                            ui.heading("Navigation"); ui.end_row();
-                            add_row(ui, "Open selected item", "Enter");
-                            add_row(ui, "Up one folder", "Backspace, Left, Alt+Up");
-                            add_row(ui, "Back", "Alt+Left");
-                            add_row(ui, "Forward", "Alt+Right");
-                            add_row(ui, "Go to home folder", "Alt+Home");
-                            add_row(ui, "Go to This PC", "Ctrl+Shift+M");
-                            add_row(ui, "Go to Recycle Bin", "Ctrl+Shift+B");
-                            add_row(ui, "First item", "Home");
-                            add_row(ui, "Last item", "End");
-                            add_row(ui, "Move up 15 rows", "PgUp");
-                            add_row(ui, "Move down 15 rows", "PgDn");
-
-                            ui.heading("Files"); ui.end_row();
-                            add_row(ui, "Select all", "Ctrl+A");
-                            add_row(ui, "Copy", "Ctrl+C");
-                            add_row(ui, "Cut", "Ctrl+X");
-                            add_row(ui, "Paste", "Ctrl+V");
-                            add_row(ui, "Rename", "F2");
-                            add_row(ui, "Delete (to Recycle Bin)", "Delete");
-                            add_row(ui, "Delete permanently", "Shift+Delete");
-                            add_row(ui, "New file", "Ctrl+N");
-                            add_row(ui, "New folder", "Ctrl+Shift+N");
-
-                            ui.heading("Quick access"); ui.end_row();
-                            add_row(ui, "Pin / unpin this folder", "Ctrl+P");
-
-                            ui.heading("View"); ui.end_row();
-                            add_row(ui, "Show / hide hidden files", "Ctrl+H");
-                            add_row(ui, "Dark / light mode", "Ctrl+Shift+D");
-                            add_row(ui, "Sort by name", "Ctrl+1");
-                            add_row(ui, "Sort by size", "Ctrl+2");
-                            add_row(ui, "Sort by date", "Ctrl+3");
-                            add_row(ui, "Refresh", "F5, Ctrl+R");
-
-                            ui.heading("Fixed keys"); ui.end_row();
-                            add_row(ui, "Up / Down", "Move selection");
-                            add_row(ui, "Shift+Up / Shift+Down", "Extend selection");
-                            add_row(ui, "Space", "Toggle focused item");
-                            add_row(ui, "Esc", "Clear filter / close this menu");
-                            add_row(ui, "Click + drag", "Draw selection box (lasso)");
-                            add_row(ui, "F1", "Show this help");
-                            add_row(ui, "Ctrl+Q", "Quit");
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .max_height(800.0)
+                        .show(ui, |ui| {
+                            ui.columns(num_cols, |cols| {
+                                let mut idx = 0usize;
+                                for (ci, &count) in per_col.iter().enumerate() {
+                                    let col_ui = &mut cols[ci];
+                                    for si in 0..count {
+                                        if idx >= sections.len() {
+                                            break;
+                                        }
+                                        let sec = &sections[idx];
+                                        // Blank line before every heading except
+                                        // the first one at the top of a column.
+                                        if si > 0 {
+                                            col_ui.add_space(12.0);
+                                        }
+                                        egui::Grid::new(("sc_grid", ci, si))
+                                            .num_columns(2)
+                                            .spacing([20.0, 4.0])
+                                            .striped(true)
+                                            .show(col_ui, |ui| {
+                                                ui.heading(sec.title);
+                                                ui.label("");
+                                                ui.end_row();
+                                                for (label, keys) in sec.rows {
+                                                    ui.label(*label);
+                                                    ui.label(
+                                                        egui::RichText::new(*keys)
+                                                            .color(dim_color),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            });
+                                        idx += 1;
+                                    }
+                                }
+                            });
                         });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("Close").clicked() {
+                            close_clicked = true;
+                        }
                     });
-                    ui.add_space(10.0);
-                    if ui.button("Close").clicked() {
-                        close_clicked = true;
-                    }
                 });
 
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || close_clicked || !is_open {
@@ -1354,6 +1634,7 @@ impl eframe::App for KeyFmApp {
             }
         }
 
+        // ---- Keyboard handlers ----
         if !ctx.wants_keyboard_input() && !self.modal_open() {
             // File Ops
             if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
@@ -1368,7 +1649,9 @@ impl eframe::App for KeyFmApp {
             } else if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::N)) {
                 self.active_dialog = Some(("NewFile".to_string(), String::new()));
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Delete)) {
+            if ctx.input(|i| {
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Delete)
+            }) {
                 self.confirm_empty_bin = true;
             }
             if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::C)) {
@@ -1387,13 +1670,25 @@ impl eframe::App for KeyFmApp {
                 self.refresh_keep_selection();
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num1)) {
-                self.entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+                self.entries.sort_by(|a, b| {
+                    b.is_dir
+                        .cmp(&a.is_dir)
+                        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                });
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num2)) {
-                self.entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| b.size.cmp(&a.size)));
+                self.entries.sort_by(|a, b| {
+                    b.is_dir.cmp(&a.is_dir).then_with(|| b.size.cmp(&a.size))
+                });
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Num3)) {
-                self.entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| b.mtime.partial_cmp(&a.mtime).unwrap_or(std::cmp::Ordering::Equal)));
+                self.entries.sort_by(|a, b| {
+                    b.is_dir.cmp(&a.is_dir).then_with(|| {
+                        b.mtime
+                            .partial_cmp(&a.mtime)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                });
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::R)) {
                 self.refresh_keep_selection();
@@ -1421,9 +1716,15 @@ impl eframe::App for KeyFmApp {
             // Go to tab 1-9
             for i in 1..=9 {
                 let key = match i {
-                    1 => egui::Key::Num1, 2 => egui::Key::Num2, 3 => egui::Key::Num3,
-                    4 => egui::Key::Num4, 5 => egui::Key::Num5, 6 => egui::Key::Num6,
-                    7 => egui::Key::Num7, 8 => egui::Key::Num8, _ => egui::Key::Num9,
+                    1 => egui::Key::Num1,
+                    2 => egui::Key::Num2,
+                    3 => egui::Key::Num3,
+                    4 => egui::Key::Num4,
+                    5 => egui::Key::Num5,
+                    6 => egui::Key::Num6,
+                    7 => egui::Key::Num7,
+                    8 => egui::Key::Num8,
+                    _ => egui::Key::Num9,
                 };
                 if ctx.input(|inp| inp.modifiers.alt && inp.key_pressed(key)) {
                     if self.tabs.len() >= i {
@@ -1432,7 +1733,7 @@ impl eframe::App for KeyFmApp {
                 }
             }
 
-            // Next / Prev tab with Ctrl+PgDn / Ctrl+PgUp
+            // Next / Prev tab
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::PageDown)) {
                 if self.tabs.len() > 1 {
                     let next = (self.cur_tab + 1) % self.tabs.len();
@@ -1441,23 +1742,36 @@ impl eframe::App for KeyFmApp {
             }
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::PageUp)) {
                 if self.tabs.len() > 1 {
-                    let prev = if self.cur_tab == 0 { self.tabs.len() - 1 } else { self.cur_tab - 1 };
+                    let prev = if self.cur_tab == 0 {
+                        self.tabs.len() - 1
+                    } else {
+                        self.cur_tab - 1
+                    };
                     self.load_tab(prev);
                 }
             }
 
             if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
                 let vis = self.visible_indices();
-                if !vis.is_empty() { self.selected_item = Some(vis[0]); self.selected_items.clear(); }
+                if !vis.is_empty() {
+                    self.selected_item = Some(vis[0]);
+                    self.selected_items.clear();
+                }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::End)) {
                 let vis = self.visible_indices();
-                if !vis.is_empty() { self.selected_item = Some(*vis.last().unwrap()); self.selected_items.clear(); }
+                if !vis.is_empty() {
+                    self.selected_item = Some(*vis.last().unwrap());
+                    self.selected_items.clear();
+                }
             }
             if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
-                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let pos = self
+                        .selected_item
+                        .and_then(|s| vis.iter().position(|&v| v == s))
+                        .unwrap_or(0);
                     let new_pos = pos.saturating_sub(15);
                     self.selected_item = Some(vis[new_pos]);
                     self.selected_items.clear();
@@ -1466,16 +1780,23 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
-                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let pos = self
+                        .selected_item
+                        .and_then(|s| vis.iter().position(|&v| v == s))
+                        .unwrap_or(0);
                     let new_pos = (pos + 15).min(vis.len() - 1);
                     self.selected_item = Some(vis[new_pos]);
                     self.selected_items.clear();
                 }
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::M)) {
+            if ctx.input(|i| {
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::M)
+            }) {
                 navigate_to = Some(THIS_PC.to_string());
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::B)) {
+            if ctx.input(|i| {
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::B)
+            }) {
                 navigate_to = Some(RECYCLE.to_string());
             }
             if ctx.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::Home)) {
@@ -1499,26 +1820,38 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowDown)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
-                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let pos = self
+                        .selected_item
+                        .and_then(|s| vis.iter().position(|&v| v == s))
+                        .unwrap_or(0);
                     let new_pos = (pos + 1).min(vis.len() - 1);
                     self.selected_item = Some(vis[new_pos]);
-                    if !self.selected_items.contains(&vis[new_pos]) { self.selected_items.push(vis[new_pos]); }
+                    if !self.selected_items.contains(&vis[new_pos]) {
+                        self.selected_items.push(vis[new_pos]);
+                    }
                 }
             }
             if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowUp)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
-                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s)).unwrap_or(0);
+                    let pos = self
+                        .selected_item
+                        .and_then(|s| vis.iter().position(|&v| v == s))
+                        .unwrap_or(0);
                     let new_pos = pos.saturating_sub(1);
                     self.selected_item = Some(vis[new_pos]);
-                    if !self.selected_items.contains(&vis[new_pos]) { self.selected_items.push(vis[new_pos]); }
+                    if !self.selected_items.contains(&vis[new_pos]) {
+                        self.selected_items.push(vis[new_pos]);
+                    }
                 }
             }
 
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
-                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s));
+                    let pos = self
+                        .selected_item
+                        .and_then(|s| vis.iter().position(|&v| v == s));
                     self.selected_item = Some(match pos {
                         Some(p) => vis[(p + 1).min(vis.len() - 1)],
                         None => vis[0],
@@ -1529,7 +1862,9 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
-                    let pos = self.selected_item.and_then(|s| vis.iter().position(|&v| v == s));
+                    let pos = self
+                        .selected_item
+                        .and_then(|s| vis.iter().position(|&v| v == s));
                     self.selected_item = Some(match pos {
                         Some(p) => vis[p.saturating_sub(1)],
                         None => vis[0],
@@ -1537,15 +1872,38 @@ impl eframe::App for KeyFmApp {
                     self.selected_items.clear();
                 }
             }
+
+            // **NEW**: plain Left arrow -> go back
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft) && !i.modifiers.any()) {
+                nav_back = true;
+            }
+            // **NEW**: plain Right arrow -> enter folder, or open file
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) && !i.modifiers.any()) {
+                if let Some(idx) = self.selected_item {
+                    if let Some(item) = self.rendered_entries().get(idx) {
+                        if item.is_dir {
+                            navigate_to = Some(item.path.to_string_lossy().to_string());
+                        } else {
+                            pending_action = UiAction::Open(item.path.clone());
+                        }
+                    }
+                }
+            }
+
+            // Enter: enter folder (old behavior) or open file (new: fallback
+            // to Open With on failure)
             if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                 if let Some(idx) = self.selected_item {
                     if let Some(item) = self.rendered_entries().get(idx) {
                         if item.is_dir {
                             navigate_to = Some(item.path.to_string_lossy().to_string());
+                        } else {
+                            pending_action = UiAction::Open(item.path.clone());
                         }
                     }
                 }
             }
+
             if ctx.input(|i| i.key_pressed(egui::Key::Backspace) && !i.modifiers.shift) {
                 let has_history =
                     self.tabs.get(self.cur_tab).map_or(false, |t| !t.back.is_empty());
@@ -1586,7 +1944,9 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {
                 self.delete_selected(false);
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::D)) {
+            if ctx.input(|i| {
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::D)
+            }) {
                 self.config.dark = !self.config.dark;
                 self.theme = if self.config.dark { DARK } else { LIGHT };
                 self.save_cfg();
@@ -1594,7 +1954,9 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::T)) {
                 self.new_tab();
             }
-            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Tab)) {
+            if ctx.input(|i| {
+                i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Tab)
+            }) {
                 if self.tabs.len() > 1 {
                     let prev = if self.cur_tab == 0 {
                         self.tabs.len() - 1
@@ -1616,7 +1978,7 @@ impl eframe::App for KeyFmApp {
             }
         }
 
-        // ---- Panel 4: bottom status bar (unchanged) ----
+        // ---- Panel 4: status bar ----
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.search_active() && self.search_running {
@@ -1653,13 +2015,15 @@ impl eframe::App for KeyFmApp {
             });
         });
 
-        // ---- Panel 5: central file list (unchanged) ----
+        // ---- Panel 5: file list ----
         egui::CentralPanel::default().show(ctx, |ui| {
             let pointer_pos = ui.input(|i| i.pointer.interact_pos());
             let primary_down = ui.input(|i| i.pointer.primary_down());
             if ui.input(|i| i.pointer.primary_pressed()) {
                 let on_panel = pointer_pos
-                    .map(|p| ui.max_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id()))
+                    .map(|p| {
+                        ui.max_rect().contains(p) && ctx.layer_id_at(p) == Some(ui.layer_id())
+                    })
                     .unwrap_or(false);
                 if on_panel {
                     self.lasso_start = pointer_pos;
@@ -1705,8 +2069,11 @@ impl eframe::App for KeyFmApp {
                         title_for("modified").unwrap_or("Modified")
                     };
                     let searching = self.search_active();
-                    let shown: &[Item] =
-                        if searching { &self.search_results } else { &self.entries };
+                    let shown: &[Item] = if searching {
+                        &self.search_results
+                    } else {
+                        &self.entries
+                    };
                     let size_w = self.config.size_col_width.clamp(60.0, 600.0);
                     let mod_w = self.config.mod_col_width.clamp(60.0, 400.0);
                     let loc_w = 240.0_f32;
@@ -1744,7 +2111,8 @@ impl eframe::App for KeyFmApp {
                                     egui::Sense::drag(),
                                 );
                                 if resp.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                    ui.ctx()
+                                        .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                                 }
                                 if resp.dragged() {
                                     size_drag -= resp.drag_delta().x;
@@ -1766,7 +2134,8 @@ impl eframe::App for KeyFmApp {
                                     egui::Sense::drag(),
                                 );
                                 if resp.hovered() {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                                    ui.ctx()
+                                        .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                                 }
                                 if resp.dragged() {
                                     mod_drag -= resp.drag_delta().x;
@@ -1778,7 +2147,9 @@ impl eframe::App for KeyFmApp {
                         })
                         .body(|mut body| {
                             for (idx, item) in shown.iter().enumerate() {
-                                if !filter.is_empty() && !item.name.to_lowercase().contains(&filter) {
+                                if !filter.is_empty()
+                                    && !item.name.to_lowercase().contains(&filter)
+                                {
                                     continue;
                                 }
                                 let name_str = item.name.clone();
@@ -1806,10 +2177,14 @@ impl eframe::App for KeyFmApp {
                                 } else if is_dir {
                                     IconKind::Folder
                                 } else {
-                                    IconKind::File { name: &icon_name, path: &item_path }
+                                    IconKind::File {
+                                        name: &icon_name,
+                                        path: &item_path,
+                                    }
                                 };
                                 let pin_str = item.path.to_string_lossy().to_string();
-                                let is_pinned = self.config.pins.iter().any(|p| p == &pin_str);
+                                let is_pinned =
+                                    self.config.pins.iter().any(|p| p == &pin_str);
 
                                 body.row(row_h, |mut row| {
                                     row.col(|ui| {
@@ -1858,7 +2233,8 @@ impl eframe::App for KeyFmApp {
                                                     item_path.to_string_lossy().to_string(),
                                                 );
                                             } else {
-                                                pending_action = UiAction::Open(item_path.clone());
+                                                pending_action =
+                                                    UiAction::Open(item_path.clone());
                                             }
                                         }
 
@@ -1878,13 +2254,13 @@ impl eframe::App for KeyFmApp {
 
                                         response.context_menu(|ui| {
                                             if ui.button("Open").clicked() {
-                                                pending_action = UiAction::Open(item_path.clone());
+                                                pending_action =
+                                                    UiAction::Open(item_path.clone());
                                                 ui.close_menu();
                                             }
-                                            if !is_dir
-                                                && ui.button("Open With (default app)").clicked()
-                                            {
-                                                pending_action = UiAction::OpenWith(item_path.clone());
+                                            if !is_dir && ui.button("Open With…").clicked() {
+                                                pending_action =
+                                                    UiAction::OpenWith(item_path.clone());
                                                 ui.close_menu();
                                             }
                                             ui.separator();
@@ -1902,7 +2278,8 @@ impl eframe::App for KeyFmApp {
                                             }
                                             ui.separator();
                                             if ui.button("Rename").clicked() {
-                                                pending_action = UiAction::Rename(item_name.clone());
+                                                pending_action =
+                                                    UiAction::Rename(item_name.clone());
                                                 ui.close_menu();
                                             }
                                             if ui.button("Delete").clicked() {
@@ -1958,12 +2335,16 @@ impl eframe::App for KeyFmApp {
                                         if self.selected_item == Some(idx)
                                             || self.selected_items.contains(&idx)
                                         {
-                                            ui.painter().rect_filled(ui.max_rect(), 0.0, self.theme.sel_bg);
+                                            ui.painter().rect_filled(
+                                                ui.max_rect(),
+                                                0.0,
+                                                self.theme.sel_bg,
+                                            );
                                         }
                                         if is_pc && item_total > 0 {
                                             let used = item_total.saturating_sub(item_size);
-                                            let frac =
-                                                (used as f32 / item_total as f32).clamp(0.0, 1.0);
+                                            let frac = (used as f32 / item_total as f32)
+                                                .clamp(0.0, 1.0);
                                             let fill = if frac > 0.9 {
                                                 self.theme.danger
                                             } else {
@@ -1971,7 +2352,8 @@ impl eframe::App for KeyFmApp {
                                             };
                                             let track = self.theme.border;
                                             ui.vertical(|ui| {
-                                                let w = (ui.available_width() - 12.0).max(60.0);
+                                                let w =
+                                                    (ui.available_width() - 12.0).max(60.0);
                                                 let (rect, _) = ui.allocate_exact_size(
                                                     egui::vec2(w, 8.0),
                                                     egui::Sense::hover(),
@@ -1979,7 +2361,10 @@ impl eframe::App for KeyFmApp {
                                                 ui.painter().rect_filled(rect, 2.0, track);
                                                 let filled = egui::Rect::from_min_size(
                                                     rect.min,
-                                                    egui::vec2(rect.width() * frac, rect.height()),
+                                                    egui::vec2(
+                                                        rect.width() * frac,
+                                                        rect.height(),
+                                                    ),
                                                 );
                                                 ui.painter().rect_filled(filled, 2.0, fill);
                                                 ui.label(format!(
@@ -1998,7 +2383,11 @@ impl eframe::App for KeyFmApp {
                                         if self.selected_item == Some(idx)
                                             || self.selected_items.contains(&idx)
                                         {
-                                            ui.painter().rect_filled(ui.max_rect(), 0.0, self.theme.sel_bg);
+                                            ui.painter().rect_filled(
+                                                ui.max_rect(),
+                                                0.0,
+                                                self.theme.sel_bg,
+                                            );
                                         }
                                         ui.label(time_str);
                                     });
@@ -2050,14 +2439,18 @@ impl eframe::App for KeyFmApp {
                 });
 
             if let Some(lr) = lasso_rect {
-                stroke_rect(ui.painter(), lr, egui::Stroke::new(1.0_f32, self.theme.accent));
+                stroke_rect(
+                    ui.painter(),
+                    lr,
+                    egui::Stroke::new(1.0_f32, self.theme.accent),
+                );
             }
             if ui.input(|i| i.pointer.primary_released()) {
                 self.lasso_start = None;
             }
         });
 
-        // ---- Action dispatch (unchanged) ----
+        // ---- Action dispatch ----
         match pending_action {
             UiAction::None => {}
             UiAction::Copy => self.copy_or_cut("copy"),
@@ -2080,11 +2473,23 @@ impl eframe::App for KeyFmApp {
                 self.config.pins.retain(|x| x != &p);
                 self.save_cfg();
             }
-            UiAction::Open(path) | UiAction::OpenWith(path) => {
+            UiAction::Open(path) => {
                 if path.is_dir() {
                     navigate_to = Some(path.to_string_lossy().to_string());
-                } else if let Err(e) = keyfm::apps::default_open(&path) {
-                    self.status_msg = format!("Open failed: {}", e);
+                } else {
+                    match keyfm::apps::default_open(&path) {
+                        Ok(()) => {}
+                        Err(_) => {
+                            self.open_with = Some(OpenWithState::new(path));
+                        }
+                    }
+                }
+            }
+            UiAction::OpenWith(path) => {
+                if !path.is_dir() {
+                    self.open_with = Some(OpenWithState::new(path));
+                } else {
+                    navigate_to = Some(path.to_string_lossy().to_string());
                 }
             }
             UiAction::NewFolder => {
@@ -2107,7 +2512,7 @@ impl eframe::App for KeyFmApp {
             self.status_msg = "Not available in this view".to_string();
         }
 
-        // ---- Dialogs (unchanged) ----
+        // ---- Empty Recycle Bin dialog ----
         if self.confirm_empty_bin {
             let (mut do_empty, mut close) = (false, false);
             egui::Window::new("Empty Recycle Bin")
@@ -2142,6 +2547,181 @@ impl eframe::App for KeyFmApp {
             }
         }
 
+        // ---- Open With dialog ----
+        if self.open_with.is_some() {
+            let mut launch_exe: Option<String> = None;
+            let mut close_dialog = false;
+
+            if let Some(state) = self.open_with.as_mut() {
+                let target_name = state
+                    .target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| state.target.display().to_string());
+
+                let mut start_picker = false;
+
+                egui::Window::new("Open With")
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(420.0)
+                    .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                    .show(ctx, |ui| {
+                        ui.label(format!(
+                            "Choose an application to open \"{}\":",
+                            target_name
+                        ));
+                        ui.add_space(6.0);
+
+                        let apps = keyfm::apps::list_apps();
+                        if apps.is_empty() {
+                            ui.weak("No known applications available for this file type.");
+                        } else {
+                            for (name, exe) in &apps {
+                                if ui.button(name).clicked() {
+                                    launch_exe = Some(exe.clone());
+                                    close_dialog = true;
+                                }
+                            }
+                        }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Choose another program…").clicked() {
+                                start_picker = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_dialog = true;
+                            }
+                        });
+                    });
+
+                if start_picker {
+                    state.start_picker();
+                }
+
+                if state.picker_open {
+                    let mut go_up = false;
+                    let mut nav_pick: Option<PathBuf> = None;
+                    let mut use_selected = false;
+
+                    egui::Window::new("Choose Program")
+                        .collapsible(false)
+                        .resizable(true)
+                        .default_width(620.0)
+                        .default_height(460.0)
+                        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("⬆").clicked() {
+                                    go_up = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(
+                                        state.picker_cwd.display().to_string(),
+                                    )
+                                    .monospace(),
+                                );
+                            });
+                            ui.separator();
+
+                            egui::ScrollArea::vertical()
+                                .max_height(320.0)
+                                .show(ui, |ui| {
+                                    if state.picker_entries.is_empty() {
+                                        ui.weak("(no executables or folders here)");
+                                    }
+                                    for (i, entry) in state.picker_entries.iter().enumerate() {
+                                        let icon = if entry.is_dir { "📁" } else { "📄" };
+                                        let label = format!("{} {}", icon, entry.name);
+                                        let selected = state.picker_selected == Some(i);
+                                        let resp = ui.selectable_label(selected, label);
+                                        if resp.clicked() {
+                                            state.picker_selected = Some(i);
+                                        }
+                                        if resp.double_clicked() {
+                                            if entry.is_dir {
+                                                nav_pick = Some(entry.path.clone());
+                                            } else {
+                                                launch_exe = Some(
+                                                    entry.path.to_string_lossy().to_string(),
+                                                );
+                                                close_dialog = true;
+                                            }
+                                        }
+                                    }
+                                });
+
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                let can_use = state
+                                    .picker_selected
+                                    .and_then(|i| state.picker_entries.get(i))
+                                    .map(|e| !e.is_dir)
+                                    .unwrap_or(false);
+                                if ui
+                                    .add_enabled(can_use, egui::Button::new("Use selected"))
+                                    .clicked()
+                                {
+                                    use_selected = true;
+                                }
+                                if ui.button("Back").clicked() {
+                                    state.picker_open = false;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close_dialog = true;
+                                }
+                            });
+                        });
+
+                    if go_up {
+                        if let Some(parent) = state.picker_cwd.parent() {
+                            nav_pick = Some(parent.to_path_buf());
+                        }
+                    }
+                    if let Some(p) = nav_pick {
+                        state.picker_cwd = p;
+                        state.reload_picker();
+                    }
+                    if use_selected {
+                        if let Some(i) = state.picker_selected {
+                            if let Some(entry) = state.picker_entries.get(i) {
+                                if !entry.is_dir {
+                                    launch_exe =
+                                        Some(entry.path.to_string_lossy().to_string());
+                                    close_dialog = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Escape: picker first, then dialog
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if state.picker_open {
+                        state.picker_open = false;
+                    } else {
+                        close_dialog = true;
+                    }
+                }
+            }
+
+            if let Some(exe) = launch_exe {
+                let target = self.open_with.as_ref().map(|s| s.target.clone());
+                self.open_with = None;
+                if let Some(target) = target {
+                    match keyfm::apps::launch_with(&exe, &target) {
+                        Ok(()) => self.status_msg = format!("Opened with {}", exe),
+                        Err(e) => self.status_msg = format!("Launch failed: {}", e),
+                    }
+                }
+            } else if close_dialog {
+                self.open_with = None;
+            }
+        }
+
+        // ---- Rename / New File / New Folder dialog ----
         if let Some((action, mut input_val)) = self.active_dialog.take() {
             let fresh = !self.dialog_seen;
             self.dialog_seen = true;
@@ -2228,8 +2808,10 @@ impl eframe::App for KeyFmApp {
                     Ok(()) => {
                         self.status_msg.clear();
                         self.refresh_dir();
-                        if let Some(pos) =
-                            self.rendered_entries().iter().position(|it| it.path == target)
+                        if let Some(pos) = self
+                            .rendered_entries()
+                            .iter()
+                            .position(|it| it.path == target)
                         {
                             self.selected_item = Some(pos);
                         }
@@ -2248,6 +2830,7 @@ impl eframe::App for KeyFmApp {
             }
         }
 
+        // ---- Navigation dispatch ----
         if nav_back {
             self.go_back();
         } else if nav_forward {
@@ -2291,13 +2874,40 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         "keyfm",
         options,
-        Box::new(|_cc| Ok(Box::new(KeyFmApp::new(start)))),
+        Box::new(|cc| {
+            // --- LOAD NATIVE WINDOWS FONT ---
+            let mut fonts = egui::FontDefinitions::default();
+            
+            #[cfg(windows)]
+            {
+                // Segoe UI is the standard Windows 10/11 font.
+                if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+                    fonts.font_data.insert("segoe".to_owned(), egui::FontData::from_owned(font_data));
+                    
+                    // Set it as the highest priority font for normal text
+                    fonts.families.get_mut(&egui::FontFamily::Proportional).unwrap().insert(0, "segoe".to_owned());
+                    // Also use it for monospace (like paths) so it looks cohesive
+                    fonts.families.get_mut(&egui::FontFamily::Monospace).unwrap().insert(0, "segoe".to_owned());
+                }
+            }
+            
+            cc.egui_ctx.set_fonts(fonts);
+            // --------------------------------
+
+            Ok(Box::new(KeyFmApp::new(start)))
+        }),
     )
 }
 
 const SEARCH_DEBOUNCE_MS: u64 = 150;
 const SEARCH_RESULT_CAP: usize = 5000;
-const SKIP_DIRS: &[&str] = &["$Recycle.Bin", "System Volume Information", "Windows", "node_modules", ".git"];
+const SKIP_DIRS: &[&str] = &[
+    "$Recycle.Bin",
+    "System Volume Information",
+    "Windows",
+    "node_modules",
+    ".git",
+];
 
 pub struct SearchHit {
     pub path: std::path::PathBuf,
@@ -2334,12 +2944,20 @@ fn run_walk(
     use std::sync::atomic::Ordering;
     let mut stack = vec![root];
     while let Some(dir) = stack.pop() {
-        if cancel.load(Ordering::Relaxed) { return; }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
-            if cancel.load(Ordering::Relaxed) { return; }
+            if cancel.load(Ordering::Relaxed) {
+                return;
+            }
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
 
             let name_os = entry.file_name();
             let name = name_os.to_string_lossy();
@@ -2353,14 +2971,27 @@ fn run_walk(
                 }
             }
 
-            if !show_hidden && hidden { continue; }
+            if !show_hidden && hidden {
+                continue;
+            }
 
             if name.to_lowercase().contains(&needle) {
                 let size = if is_dir { 0 } else { meta.len() };
                 let mtime = meta.modified().ok().and_then(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64())
+                    t.duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .map(|d| d.as_secs_f64())
                 });
-                if tx.send(SearchHit { path, name: name.into_owned(), is_dir, size, mtime }).is_err() {
+                if tx
+                    .send(SearchHit {
+                        path,
+                        name: name.into_owned(),
+                        is_dir,
+                        size,
+                        mtime,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }

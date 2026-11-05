@@ -1,0 +1,519 @@
+================================================================================
+keyfm bug report
+File: bugfile.txt
+Scope: all known bugs found in config.rs, constants.rs, drives.rs, helpers.rs,
+       keys.rs, lib.rs, main.rs, models.rs, theme.rs, trash.rs, apps.rs
+================================================================================
+
+
+SEVERITY LEGEND
+  [CRIT]  Critical — feature is dead or data can be lost
+  [HIGH]  High     — visible misbehaviour / wrong result
+  [MED]   Medium   — wrong in edge cases
+  [LOW]   Low      — cosmetic / minor robustness
+
+
+--------------------------------------------------------------------------------
+[CRIT] 1. Multi-selection ignored by every file operation
+--------------------------------------------------------------------------------
+Location: main.rs — KeyFmApp::copy_or_cut / paste / delete_selected
+Problem : selected_items: Vec<usize> is populated by the lasso, but every
+          file op reads only self.selected_item.
+          - copy_or_cut -> self.clipboard = vec![item.path.clone()]   (1 path)
+          - delete_selected reads only self.selected_item
+          - paste consumes self.clipboard which is always length 1
+          Worse:  `if ui.input(|i| i.pointer.primary_pressed()) {
+                      self.selected_items.clear();
+                  }` wipes any multi-selection on every mouse-down, so even
+          lasso-built selections are thrown away the moment the user touches
+          the mouse again.
+Fix     : Add `fn targets(&self) -> Vec<usize>` returning selected_items if
+          non-empty else single selected_item. Use it in copy_or_cut,
+          delete_selected, and Open. Stop clearing selected_items on every
+          primary press (only clear when starting a fresh lasso).
+
+
+--------------------------------------------------------------------------------
+[CRIT] 2. close_tab() corrupts the surviving tab's saved state
+--------------------------------------------------------------------------------
+Location: main.rs — close_tab / load_tab / save_current_tab
+Problem : close_tab removes self.tabs[self.cur_tab] then calls load_tab(idx).
+          load_tab starts with save_current_tab(), which writes the *current
+          view* (the just-closed tab's cwd/filter/focus) into whichever tab
+          now occupies cur_tab, overwriting that tab's saved state.
+Fix     : Save the current view BEFORE remove; after remove+clamp, load the
+          target tab without triggering save_current_tab (either inline the
+          load or add load_tab_no_save(index)).
+
+
+--------------------------------------------------------------------------------
+[CRIT] 3. Current tab label is stale after navigation
+--------------------------------------------------------------------------------
+Location: main.rs — navigate_to consumer at end of update()
+Problem : Navigating updates self.cwd but never the active tab's Tab::cwd, so
+          the tab-strip label keeps showing the OLD directory until the user
+          switches tabs.
+Fix     : After `self.cwd = new_path; self.refresh_dir();`, do
+          `if let Some(t) = self.tabs.get_mut(self.cur_tab) {
+               t.cwd = Some(std::path::PathBuf::from(&self.cwd));
+           }`.
+          Do the same anywhere else self.cwd is mutated.
+
+
+--------------------------------------------------------------------------------
+[CRIT] 4. Virtual locations (This PC / Recycle Bin) are dead
+--------------------------------------------------------------------------------
+Location: main.rs — refresh_dir, sidebar click handler
+Problem : Sidebar navigates to "::recycle-bin::" and "::this-pc::", but
+          refresh_dir calls std::fs::read_dir on those strings -> Err -> empty
+          view, no error surfaced, self.cwd now points at a fake path.
+          Recycle Bin is only pushed by drives::known_folders on Windows;
+          THIS_PC is defined but never used anywhere.
+Fix     : In refresh_dir, branch on self.cwd:
+          - THIS_PC    -> populate from drives::scan_drives()
+          - RECYCLE    -> populate from $Recycle.Bin\<sid>\$I* files via
+                          trash::parse_i_file (extend it to return the
+                          original path); non-Windows -> status_msg.
+          Add a sidebar button for This PC. Guard Path::parent() and Back/Up
+          when constants::VIRTUAL contains self.cwd.
+
+
+--------------------------------------------------------------------------------
+[CRIT] 5. F2 conflict — dark-mode toggle unreachable, Rename on reserved key
+--------------------------------------------------------------------------------
+Location: keys.rs (FIXED_KEYS, ACTION_DEFS toggle_dark) + main.rs keyboard
+Problem : F2 is reserved (FIXED_KEYS) and bound to toggle_dark in ACTION_DEFS,
+          but the main.rs hardcoded keyboard block uses F2 to open the Rename
+          dialog. So toggle_dark can never fire, and Rename sits on a
+          "reserved" key. config.dark can only be changed by editing the file.
+Fix     : Remove ("F2","toggle_dark") from FIXED_KEYS, change toggle_dark's
+          default_keys to &["Ctrl+Shift+d"], remove the F2->Rename branch in
+          main.rs, add:
+            if ctx.input(|i| i.modifiers.ctrl && i.modifiers.shift
+                            && i.key_pressed(egui::Key::D)) {
+                self.config.dark = !self.config.dark;
+                self.theme = if self.config.dark { DARK } else { LIGHT };
+                let _ = keyfm::config::save_config(&self.config);
+            }
+
+
+--------------------------------------------------------------------------------
+[CRIT] 6. config.keys / config.unpinned / config.assoc are dead features
+--------------------------------------------------------------------------------
+Location: main.rs keyboard dispatch vs. config.rs + keys.rs
+Problem : config.rs carefully parses user key bindings into cfg.keys, keys.rs
+          provides the full action table (ACTION_DEFS), and main.rs dispatches
+          keys via hardcoded egui::Key::* checks only. None of these actions
+          are implemented at all:
+            up/down, page_up/page_down, home/end, parent, root, recycle, cd,
+            search, quick_jump, select, select_all, invert_selection,
+            clear_selection, visual_line, copy, cut, paste, delete,
+            permanent_delete, rename, new_file, new_dir, properties,
+            open_default, open_with, terminal, toggle_hidden, toggle_dark,
+            sort_*, pin, sidebar_focus, help, refresh (only F5), quit,
+            command_palette.
+          config.assoc ("Open With" associations) is parsed but never used.
+          config.unpinned is parsed but never used.
+Fix     : Build a resolved binding map at startup (user config overrides
+          defaults) and dispatch through it. Stub the actions whose behaviour
+          is missing.
+
+
+--------------------------------------------------------------------------------
+[CRIT] 7. Old pin file is deleted before the new config is saved
+--------------------------------------------------------------------------------
+Location: config.rs — load_config_from
+Problem : When the main config is missing/corrupt and the old pin file
+          exists, cfg.pins is filled from old_pins and then
+          fs::remove_file(old_pins) runs immediately. Nothing calls
+          save_config() unless the user happens to pin/unpin. Quitting
+          afterwards = pins gone forever.
+Fix     : Do NOT remove old_pins inside load_config_from. Either return
+          (Config, needs_save: bool) and have KeyFmApp::new call save_config
+          when true, or defer the remove to save_config_to after a successful
+          save. Only delete old_pins on success.
+
+
+--------------------------------------------------------------------------------
+[HIGH] 8. Empty View / Go menu buttons
+--------------------------------------------------------------------------------
+Location: main.rs — menu bar
+Problem : `ui.menu_button("View", |_ui| {});` and
+          `ui.menu_button("Go",   |_ui| {});` are dead controls. Alt+S is
+          reserved in keys::get_reserved for a Sort menu that doesn't exist.
+Fix     : Populate or remove. Minimal:
+            View -> Dark mode, Show hidden, Refresh
+            Go   -> This PC, Recycle Bin, Home, each known_folder(), each drive
+
+
+--------------------------------------------------------------------------------
+[HIGH] 9. Paste silently skips directories
+--------------------------------------------------------------------------------
+Location: main.rs — paste
+Problem : `if src.is_dir() { eprintln!(...); continue; }` — copying a folder
+          does nothing.
+Fix     : Add helpers::copy_dir_all(src,dst) using create_dir_all + read_dir
+          recursion. Use it for copy mode; for cut mode use fs::rename with a
+          copy_dir_all + remove_dir_all fallback on cross-device.
+
+
+--------------------------------------------------------------------------------
+[HIGH] 10. Cut clipboard is wiped even on partial failure
+--------------------------------------------------------------------------------
+Location: main.rs — paste
+Problem : `if self.clip_mode == "cut" { self.clipboard.clear(); }` runs
+          unconditionally. If some renames succeed and some fail, the un-moved
+          paths are also removed from the clipboard.
+Fix     : Track succeeded/failed. After loop:
+            if clip_mode == "cut" { self.clipboard = failed_srcs; }
+
+
+--------------------------------------------------------------------------------
+[HIGH] 11. Back / Forward buttons are wrong
+--------------------------------------------------------------------------------
+Location: main.rs — toolbar
+Problem : "Back" calls Path::parent (identical to "Up", not history).
+          "Forward" is a no-op (`// Forward navigation placeholder`).
+          Tab.back / Tab.fwd are stored but never used.
+Fix     : Use Tab.back / Tab.fwd as a real history stack. Push old cwd on
+          navigate; clear fwd. Back pops from back -> push to fwd -> set cwd.
+          Forward pops from fwd -> push to back -> set cwd.
+
+
+--------------------------------------------------------------------------------
+[HIGH] 12. Delete failure deselects and hides the error
+--------------------------------------------------------------------------------
+Location: main.rs — delete_selected
+Problem : self.selected_item = None runs inside the if-let before knowing
+          whether the delete succeeded; on Err, status_msg is set but the
+          item stays and the user has to re-find it.
+Fix     : Capture Result, set selected_item = None only on Ok, set
+          status_msg on Err, keep the selection so the user can retry.
+
+
+--------------------------------------------------------------------------------
+[HIGH] 13. navigate_to accepts arbitrary strings; ~ is not expanded
+--------------------------------------------------------------------------------
+Location: main.rs — path-input Enter handler and end-of-update
+Problem : Typing "~/Downloads" does not expand the tilde (only
+          helpers::get_start_dir does, via shellexpand_tilde). Invalid paths
+          silently leave an empty view with garbage self.cwd and no message.
+Fix     : Add helpers::expand_and_validate(&str) -> Option<PathBuf> that
+          expands a leading ~, resolves absolute, and checks is_dir(). Use it
+          in the path input handler and at the navigate_to consumer. On None,
+          set self.status_msg = "Not a directory: <raw>".
+
+
+--------------------------------------------------------------------------------
+[MED] 14. Post-create / post-rename reselect picks wrong entry
+--------------------------------------------------------------------------------
+Location: main.rs — active_dialog handling
+Problem : After success, `self.entries.iter().position(|it| it.name == name)`
+          matches by name only. If two entries share a name (or File::create
+          overwrote an existing file), the wrong index is selected.
+Fix     : Match on item.path == base.join(&name). Also check
+          base.join(&name).exists() before File::create / create_dir and
+          surface "Already exists" while keeping the dialog open.
+
+
+--------------------------------------------------------------------------------
+[MED] 15. norm_spec does not case-fold non-letter keys
+--------------------------------------------------------------------------------
+Location: keys.rs — norm_spec
+Problem : Only single alphabetic characters are uppercased. So "esc" stays
+          "esc" while "Escape" -> "Esc". "tab"/"Tab" behave inconsistently.
+          Case-insensitive intent is not realised.
+Fix     : Lowercase keys in get_key_aliases / get_key_display; lowercase
+          lookup_key before map lookups. Add unit tests:
+            norm_spec("esc")   == norm_spec("Escape") == "Esc"
+            norm_spec("ctrl+return") == "Ctrl+Enter"
+
+
+--------------------------------------------------------------------------------
+[MED] 16. '+' itself is unbindable in split_key
+--------------------------------------------------------------------------------
+Location: keys.rs — split_key
+Problem : spec.split('+') drops the empty segment, so "Ctrl++" -> ["Ctrl"]
+          and "+" -> [].
+Fix     : Special-case trailing "++" / bare "+". Test:
+            split_key("Ctrl++") == (["Ctrl"], "+")
+
+
+--------------------------------------------------------------------------------
+[MED] 17. Keyboard navigation ignores the filter
+--------------------------------------------------------------------------------
+Location: main.rs — arrow-key handlers
+Problem : Arrow up/down move through self.entries (which still contains
+          filtered-out items), so the highlighted row can be completely
+          invisible. selected_item may point at a hidden index whose row is
+          never drawn.
+Fix     : Add fn visible_indices(&self) -> Vec<usize>; move selection
+          within that list and map back to entries indices. Reset
+          selected_item to first visible when the filter changes.
+
+
+--------------------------------------------------------------------------------
+[MED] 18. get_reserved reserves keys with no implementation
+--------------------------------------------------------------------------------
+Location: keys.rs — get_reserved
+Problem : Alt+F/E/V/G/S and Alt+1..9 are reserved, but no Alt-menu and no
+          tab-switch-on-Alt+N exist in main.rs.
+Fix     : Either implement Alt-menu (open menus programmatically) and
+          Alt+1..9 tab switching, or remove these entries from get_reserved.
+
+
+--------------------------------------------------------------------------------
+[MED] 19. Hardcoded keyboard handlers are incomplete
+--------------------------------------------------------------------------------
+Location: main.rs keyboard block
+Problem : Missing Space (toggle select), Ctrl+A (select all), Ctrl+I
+          (invert), Escape (clear selection), PageUp/PageDown.
+Fix     : Add these inside the existing `if !ctx.wants_keyboard_input()`
+          block, using visible_indices for select-all/invert.
+
+
+--------------------------------------------------------------------------------
+[MED] 20. Pins compare by raw string — case-sensitive on Windows
+--------------------------------------------------------------------------------
+Location: main.rs — pin check in row render, toggle_pin, SidebarUnpin
+Problem : self.config.pins.iter().any(|p| p == &pin_str) fails on
+          C:\Users vs c:\users. helpers::norm lowercases on Windows but pins
+          bypass it.
+Fix     : Store pins in helpers::norm() form. Compare via
+          helpers::same_loc / helpers::norm. Retain via norm in SidebarUnpin.
+
+
+--------------------------------------------------------------------------------
+[MED] 21. trash::parse_i_file is dead code
+--------------------------------------------------------------------------------
+Location: trash.rs
+Problem : Defined but never called. Likely intended for the Recycle-Bin view
+          (bug 4), which does not exist.
+Fix     : Either delete, or use it in bug 4's Recycle-Bin branch. If used,
+          extend return type to (version, ts, name, original_path) and parse
+          the second UTF-16 string as the original path.
+
+
+--------------------------------------------------------------------------------
+[MED] 22. unique_path is dead code — paste overwrites
+--------------------------------------------------------------------------------
+Location: helpers.rs (unused) + main.rs::paste
+Problem : helpers::unique_path exists but paste uses plain
+          dest_dir.join(file_name) -> overwrites existing files.
+Fix     : In paste, replace dest = dest_dir.join(file_name) with
+          helpers::unique_path(&dest_dir, &file_name.to_string_lossy(),
+                               src.is_dir()).
+
+
+--------------------------------------------------------------------------------
+[MED] 23. "Open With" is identical to "Open"
+--------------------------------------------------------------------------------
+Location: main.rs — UiAction::OpenWith match arm
+Problem : OpenWith calls apps::default_open — exactly the same as Open.
+          apps::list_apps / apps::launch_with are dead code.
+Fix     : Add OpenWithDialog(PathBuf) UiAction and an apps_chooser field.
+          Render a small Window listing apps::list_apps() plus a custom-exe
+          text input; on choose call apps::launch_with.
+
+
+--------------------------------------------------------------------------------
+[LOW] 24. main() scans argv[0] for -h / -V
+--------------------------------------------------------------------------------
+Location: main.rs — main
+Problem : `for arg in &args {` includes argv[0]. If the binary path is -h or
+          -V it will print help/version spuriously.
+Fix     : Use args.iter().skip(1).
+
+
+--------------------------------------------------------------------------------
+[LOW] 25. parse_i_file silently truncates the name field
+--------------------------------------------------------------------------------
+Location: trash.rs — parse_i_file
+Problem : min(24+520, len) / min(start+n*2, len) silently truncates a
+          shortened $I file.
+Fix     : Strict bounds check; return None if data.len() < expected_end.
+
+
+--------------------------------------------------------------------------------
+[LOW] 26. Lasso/single-selection interleaving destroys "last-touched" meaning
+--------------------------------------------------------------------------------
+Location: main.rs — lasso render loop
+Problem : Inside the lasso branch, `self.selected_item = Some(idx)` is
+          executed for every row the lasso touches, so the final
+          selected_item is the last touched row — which then becomes the
+          single target of file ops that read selected_item.
+Fix     : Remove the assignment from inside the loop. On primary release,
+          set self.selected_item = selected_items.last().copied() if
+          non-empty, or rely on targets() preferring selected_items.
+
+
+--------------------------------------------------------------------------------
+[LOW] 27. Rename / create failures print only to stderr
+--------------------------------------------------------------------------------
+Location: main.rs — active_dialog handling (NewFolder / NewFile / Rename)
+Problem : eprintln!("... failed: {}", e) — user sees nothing in status bar.
+Fix     : Set self.status_msg on error. For "target exists" reopen the
+          dialog with the attempted name.
+
+
+--------------------------------------------------------------------------------
+[LOW] 28. Text edit in create/rename dialog never gets focus
+--------------------------------------------------------------------------------
+Location: main.rs — active_dialog egui::Window
+Problem : text_edit_singleline is not focused, so the user must click into
+          the field before typing.
+Fix     : Add dialog_just_opened: bool; on first frame call resp.request_focus()
+          and clear the flag.
+
+
+--------------------------------------------------------------------------------
+[LOW] 29. Dialog input is lost on failure
+--------------------------------------------------------------------------------
+Location: main.rs — active_dialog handling
+Problem : On failure, active_dialog is already None (we took it), so the
+          dialog closes and the user's input disappears without an error.
+Fix     : On error, self.active_dialog = Some((action, input_val)) and set
+          status_msg.
+
+
+--------------------------------------------------------------------------------
+[LOW] 30. save_config_to fails silently on cross-device rename
+--------------------------------------------------------------------------------
+Location: config.rs — save_config_to
+Problem : tmp-then-rename fails across filesystems (NFS/symlinked $HOME) and
+          returns false; every caller does `let _ = ...` so the failure is
+          invisible.
+Fix     : On rename error, fall back to fs::copy(tmp,path) + remove_file(tmp).
+          In main.rs, replace `let _ = save_config(...)` with
+          `if !save_config(...) { self.status_msg = "Failed to save config"; }`.
+
+
+--------------------------------------------------------------------------------
+[LOW] 31. fmt_time is wrong for pre-1970 mtimes
+--------------------------------------------------------------------------------
+Location: helpers.rs — fmt_time
+Problem : trunc() + fract().abs() maps -1.5s to -0.5s.
+Fix     : let secs = t.floor() as i64;
+          let nsecs = ((t - t.floor()) * 1e9) as u32;
+
+
+--------------------------------------------------------------------------------
+[LOW] 32. Windows hidden-attribute files are always shown
+--------------------------------------------------------------------------------
+Location: main.rs — refresh_dir hidden check
+Problem : Only name.starts_with('.') is used to filter hidden files; the
+          Windows FILE_ATTRIBUTE_HIDDEN bit is ignored.
+Fix     : Add helpers::is_windows_hidden(&Metadata) using
+          MetadataExt::file_attributes() & 0x2 != 0; combine with the
+          dot-file check under cfg!(windows).
+
+
+--------------------------------------------------------------------------------
+[LOW] 33. The single "x" in the tab bar closes the *current* tab, not the
+          one next to it
+--------------------------------------------------------------------------------
+Location: main.rs — tab bar
+Problem : Clicking "x" always closes self.cur_tab regardless of which tab
+          label it visually follows.
+Fix     : Give each tab its own close button inside a per-tab horizontal
+          row. Add fn close_tab_at(&mut self, idx) that removes idx, clamps
+          cur_tab, and loads the neighbour without the buggy
+          save_current_tab (see bug 2).
+
+
+--------------------------------------------------------------------------------
+[LOW] 34. Deprecated egui menu API
+--------------------------------------------------------------------------------
+Location: main.rs — egui::menu::bar / ui.close_menu()
+Problem : Deprecated in egui >= 0.28; some versions emit warnings or fail
+          to compile. Version-dependent.
+Fix     : Migrate to egui::MenuBar::new().ui(ui, ...) and remove all
+          ui.close_menu() calls (the modern API auto-closes).
+
+
+--------------------------------------------------------------------------------
+[LOW] 35. Unused UiAction::EmptyBin variant
+--------------------------------------------------------------------------------
+Location: main.rs — enum UiAction
+Problem : Declared and matched but never assigned (the menu handler calls
+          trash::win_empty_recycle_bin directly).
+Fix     : Delete the variant and its match arm.
+
+
+--------------------------------------------------------------------------------
+[LOW] 36. Duplicated empty-space context menu; deselect leaks lasso state
+--------------------------------------------------------------------------------
+Location: main.rs — CentralPanel
+Problem : empty_response.context_menu(...) is created before ScrollArea,
+          which swallows the click — the first handler is dead code that
+          duplicates the one below the table. Also the remaining_rect click
+          only clears selected_item, leaving selected_items (and thus the
+          lasso highlight) orphaned.
+Fix     : Delete the empty_response interaction and its context menu. In
+          the remaining_rect click handler, also clear selected_items.
+
+
+--------------------------------------------------------------------------------
+[LOW] 37. "Open With (default app)" label is misleading for directories
+--------------------------------------------------------------------------------
+Location: main.rs — row context menu
+Problem : The entry says "Open With (default app)" but for directories it
+          navigates (UiAction::OpenWith falls into the is_dir branch).
+Fix     : Use `if is_dir { "Open" } else { "Open With…" }` for the label,
+          or hide the Open With entry when is_dir.
+
+
+--------------------------------------------------------------------------------
+[LOW] 38. Plain Refresh wipes lasso selection
+--------------------------------------------------------------------------------
+Location: main.rs — refresh_dir / UiAction::Refresh / F5
+Problem : refresh_dir always clears selected_items, so pressing F5 or
+          Refresh discards a lasso selection even though nothing about the
+          items changed.
+Fix     : Split into refresh_dir(preserve_selection: bool). For Refresh/F5
+          pass true and re-anchor by path; all other call sites pass false.
+
+
+--------------------------------------------------------------------------------
+[LOW] 39. known_folders / scan_drives recomputed every frame
+--------------------------------------------------------------------------------
+Location: main.rs — sidebar
+Problem : Both helpers are called each frame, re-walking the OS directory
+          list. Cheap but wasteful.
+Fix     : Cache in KeyFmApp.known_folders_cache /
+          KeyFmApp.drives_cache; refresh when UiAction::Refresh / F5 fires.
+
+
+--------------------------------------------------------------------------------
+[LOW] 40. Clipboard-using actions bypass the shortcut binding table
+--------------------------------------------------------------------------------
+Location: main.rs — Ctrl+C / Ctrl+X / Ctrl+V hardcoded handlers
+Problem : Copy/cut/paste shortcuts are hardcoded in the keyboard block
+          instead of going through the binding table (see bug 6). Combined
+          with bug 6, user overrides on those actions are ignored.
+Fix     : Fold these into the unified dispatcher (bug 6).
+
+
+--------------------------------------------------------------------------------
+[HIGH] 41. Lasso drag triggers ScrollArea drag-to-scroll
+--------------------------------------------------------------------------------
+Location: main.rs — egui::ScrollArea in CentralPanel
+Problem : ScrollArea defaults to drag_to_scroll(true). Dragging inside the
+          list while lassoing is interpreted as a scroll gesture, so the
+          viewport scrolls (and appears to "move down" when the user drags
+          up) while the lasso rectangle is drawn. Reported after fixing
+          bug 1: dragging up causes the screen to scroll down.
+Fix     : Change the ScrollArea builder to:
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .drag_to_scroll(false)
+                .show(ui, |ui| { ... })
+          Also change the remaining_rect interaction from Sense::click() to
+          Sense::click_and_drag() so a lasso started below the last row still
+          extends selected_items. Wheel scrolling continues to work
+          independently of drag_to_scroll.
+
+
+================================================================================
+end of file
+================================================================================
