@@ -2131,6 +2131,54 @@ impl eframe::App for KeyFmApp {
 
         // ---- Keyboard handlers ----
         if !ctx.wants_keyboard_input() && !self.modal_open() {
+            if ctx.input(|i| i.key_pressed(egui::Key::Tab) && !i.modifiers.any()) {
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                self.sidebar_focus = !self.sidebar_focus;
+                if self.sidebar_focus {
+                    let locs = self.sidebar_locations();
+                    if let Some(pos) = locs.iter().position(|l| same_loc(l, &self.cwd)) {
+                        self.sidebar_idx = pos;
+                    } else {
+                        self.sidebar_idx = 0;
+                    }
+                }
+            }
+        }
+
+        if !ctx.wants_keyboard_input() && !self.modal_open() && self.sidebar_focus {
+            let locs = self.sidebar_locations();
+            let count = locs.len();
+            if count > 0 {
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                    if self.sidebar_idx + 1 < count {
+                        self.sidebar_idx += 1;
+                    }
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                    self.sidebar_idx = self.sidebar_idx.saturating_sub(1);
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+                    self.sidebar_idx = 0;
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+                    self.sidebar_idx = count - 1;
+                }
+                if ctx.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::ArrowRight)) {
+                    if let Some(loc) = locs.get(self.sidebar_idx) {
+                        navigate_to = Some(loc.clone());
+                        self.sidebar_focus = false;
+                    }
+                }
+            }
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape) || (i.key_pressed(egui::Key::Tab) && !i.modifiers.any())) {
+                if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                    ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+                }
+                self.sidebar_focus = false;
+            }
+        }
+
+        if !ctx.wants_keyboard_input() && !self.modal_open() && !self.sidebar_focus {
             // File Ops
             if ctx.input(|i| i.key_pressed(egui::Key::F2)) {
                 if let Some(idx) = self.selected_item {
@@ -2246,21 +2294,21 @@ impl eframe::App for KeyFmApp {
                 }
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::Home) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     self.selected_item = Some(vis[0]);
                     self.selected_items.clear();
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::End)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::End) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     self.selected_item = Some(*vis.last().unwrap());
                     self.selected_items.clear();
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::PageUp)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::PageUp) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     let pos = self
@@ -2272,7 +2320,7 @@ impl eframe::App for KeyFmApp {
                     self.selected_items.clear();
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::PageDown)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::PageDown) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     let pos = self
@@ -2300,7 +2348,7 @@ impl eframe::App for KeyFmApp {
                 }
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::Space) && !self.sidebar_focus) {
                 if let Some(idx) = self.selected_item {
                     if self.selected_items.contains(&idx) {
                         self.selected_items.retain(|&x| x != idx);
@@ -2312,7 +2360,7 @@ impl eframe::App for KeyFmApp {
             if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::A)) {
                 self.selected_items = self.visible_indices();
             }
-            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowDown)) {
+            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowDown) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     let pos = self
@@ -2326,7 +2374,7 @@ impl eframe::App for KeyFmApp {
                     }
                 }
             }
-            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowUp)) {
+            if ctx.input(|i| i.modifiers.shift && i.key_pressed(egui::Key::ArrowUp) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     let pos = self
@@ -2341,7 +2389,7 @@ impl eframe::App for KeyFmApp {
                 }
             }
 
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     let pos = self
@@ -2354,7 +2402,7 @@ impl eframe::App for KeyFmApp {
                     self.selected_items.clear();
                 }
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp) && !self.sidebar_focus) {
                 let vis = self.visible_indices();
                 if !vis.is_empty() {
                     let pos = self
@@ -2369,11 +2417,11 @@ impl eframe::App for KeyFmApp {
             }
 
             // **NEW**: plain Left arrow -> go back
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft) && !i.modifiers.any()) {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowLeft) && !i.modifiers.any() && !self.sidebar_focus) {
                 nav_back = true;
             }
             // **NEW**: plain Right arrow -> enter folder, or open file
-            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) && !i.modifiers.any()) {
+            if ctx.input(|i| i.key_pressed(egui::Key::ArrowRight) && !i.modifiers.any() && !self.sidebar_focus) {
                 if let Some(idx) = self.selected_item {
                     if let Some(item) = self.rendered_entries().get(idx) {
                         if item.is_dir {
@@ -2387,7 +2435,7 @@ impl eframe::App for KeyFmApp {
 
             // Enter: enter folder (old behavior) or open file (new: fallback
             // to Open With on failure)
-            if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::Enter) && !self.sidebar_focus) {
                 if let Some(idx) = self.selected_item {
                     if let Some(item) = self.rendered_entries().get(idx) {
                         if item.is_dir {
@@ -2950,6 +2998,7 @@ row.col(|ui| {
                         if response.clicked() {
                             self.selected_item = None;
                             self.selected_items.clear();
+                            self.sidebar_focus = false;
                         }
                     }
                 });
