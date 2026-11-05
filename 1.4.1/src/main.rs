@@ -764,6 +764,8 @@ struct KeyFmApp {
     last_search_query: String,
     show_shortcuts: bool,
     open_with: Option<OpenWithState>,
+    sidebar_focus: bool,
+    sidebar_idx: usize,
 }
 
 impl KeyFmApp {
@@ -815,6 +817,8 @@ impl KeyFmApp {
             search_truncated: false,
             last_search_query: String::new(),
             open_with: None,
+            sidebar_focus: false,
+            sidebar_idx: 0,
         };
         app.refresh_dir();
         if let Some(n) = config_notice {
@@ -1037,6 +1041,18 @@ impl KeyFmApp {
                 total: 0,
             });
         }
+    }
+
+    fn sidebar_locations(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.config.pins.clone();
+        for (_, p) in &self.known_cache {
+            v.push(p.to_string_lossy().to_string());
+        }
+        v.push(THIS_PC.to_string());
+        for (_, p, _, _) in &self.drives_info_cache {
+            v.push(p.to_string_lossy().to_string());
+        }
+        v
     }
 
     fn modal_open(&self) -> bool {
@@ -1800,6 +1816,7 @@ impl eframe::App for KeyFmApp {
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("Quick access").strong().color(self.theme.dim));
 
+                let sb_locs = self.sidebar_locations();                
                 if !self.config.pins.is_empty() {
                     for pin in &self.config.pins {
                         let label = std::path::Path::new(pin)
@@ -1811,7 +1828,7 @@ impl eframe::App for KeyFmApp {
                         let resp = ui.selectable_label(is_selected, format!("📌 {}", label));
                         if resp.clicked() {
                             navigate_to = Some(pin.clone());
-                            self.sidebar_focus = true;
+                            self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, pin)).unwrap_or(0);
                             self.sidebar_idx = sb_counter - 1;
                         }
                         resp.context_menu(|ui| {
@@ -1835,7 +1852,7 @@ impl eframe::App for KeyFmApp {
                     let resp = ui.selectable_label(is_selected, *label);
                     if resp.clicked() {
                         navigate_to = Some(path_str.clone());
-                        self.sidebar_focus = true;
+                        self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, &path_str)).unwrap_or(0);
                         self.sidebar_idx = sb_counter - 1;
                     }
                     resp.context_menu(|ui| {
@@ -1865,7 +1882,7 @@ impl eframe::App for KeyFmApp {
                     .clicked()
                 {
                     navigate_to = Some(THIS_PC.to_string());
-                    self.sidebar_focus = true;
+                    self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, THIS_PC)).unwrap_or(0);
                     self.sidebar_idx = sb_counter - 1;
                 }
 
@@ -1885,7 +1902,7 @@ impl eframe::App for KeyFmApp {
                         draw_icon(ui, ppp, tex.as_ref(), false);
                         let text = format!("{} {:.1}%", label, usage);
                         if ui.selectable_label(is_selected, text).clicked() {
-                            navigate_to = Some(path_str.clone());
+                            self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, &path_str)).unwrap_or(0);
                             self.sidebar_focus = true;
                             self.sidebar_idx = sb_counter - 1;
                         }
