@@ -35,11 +35,12 @@ the blue outline while hovering over file or folder odesnt add up with where thy
 the blue outline while hovering over file or folder odesnt add up with where thye folder is, but not by a lot✔
 lasso colour change✔
 the up down controls dont work in sidebar✔
+quick access should have a page when u click on it like this pc✔
+Can only pin folders to quick access not files✔
+
 
 
 Active:
-quick access should have a page when u click on it like this pc
-Can only pin folders to quick access not files
 Search bar and path bar merge into a mess when not fullscreen do it like how windows explorer does
 All the column resizing is broken
 recycle bin extra column needed for deleted from

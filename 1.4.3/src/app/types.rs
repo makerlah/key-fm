@@ -21,4 +21,5 @@ pub(crate) enum UiAction {
     NewFolder,
     NewFile,
     Refresh,
+    ShowPathInStatus(PathBuf),
 }

@@ -117,20 +117,43 @@ impl KeyFmApp {
                     ui.set_min_height(TOPBAR_ROW_H);
                     ui.set_max_height(TOPBAR_ROW_H);
                     ui.add_space(PANEL_PAD_X);
+
                     if ui.add_enabled(can_back, egui::Button::new("Back")).clicked() { *nav_back = true; }
                     if ui.add_enabled(can_fwd, egui::Button::new("Forward")).clicked() { *nav_forward = true; }
                     if ui.add_enabled(can_up, egui::Button::new("Up")).clicked() {
                         *navigate_to = self.parent_location();
                     }
-                    ui.label("Path:");
-                    let resp = ui.text_edit_singleline(&mut self.path_input);
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        *navigate_to = Some(self.path_input.clone());
-                    }
+
+                    // Reserve a fixed strip for the search box, let the path
+                    // fill whatever is left. No overlap at any width.
+                    let avail = ui.available_width();
+                    let gap = 8.0_f32;
+                    let search_w = (avail * 0.22).clamp(140.0, 260.0);
+                    let path_total = (avail - search_w - gap).max(60.0);
+
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(path_total, TOPBAR_ROW_H),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(4.0);
+                            ui.label("Path:");
+                            let field_w = (ui.available_width() - 4.0).max(40.0);
+                            let resp = ui.add_sized(
+                                [field_w, 20.0],
+                                egui::TextEdit::singleline(&mut self.path_input),
+                            );
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                *navigate_to = Some(self.path_input.clone());
+                            }
+                        },
+                    );
+
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(PANEL_PAD_X);
-                        let search_resp = ui.add_sized([200.0, 20.0],
-                            egui::TextEdit::singleline(&mut self.search_query).hint_text("Search"));
+                        let search_resp = ui.add_sized(
+                            [search_w - 4.0, 20.0],
+                            egui::TextEdit::singleline(&mut self.search_query).hint_text("Search"),
+                        );
                         if search_resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                             self.search_query.clear();
                         }

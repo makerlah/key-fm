@@ -88,12 +88,12 @@ impl KeyFmApp {
                             let resp = ui.interact(
                                 handle,
                                 egui::Id::new("keyfm_resize_size_col"),
-                                egui::Sense::click_and_drag(),
+                                egui::Sense::drag(),
                             );
                             if resp.hovered() || resp.dragged() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                             }
-                            if resp.dragged() { size_drag -= resp.drag_delta().x; }
+                            if resp.dragged() { size_drag -= ui.input(|i| i.pointer.delta().x); }
                             if resp.drag_stopped() { drag_stopped = true; }
                         });
                         header.col(|ui| {
@@ -106,12 +106,12 @@ impl KeyFmApp {
                             let resp = ui.interact(
                                 handle,
                                 egui::Id::new("keyfm_resize_mod_col"),
-                                egui::Sense::click_and_drag(),
+                                egui::Sense::drag(),
                             );
                             if resp.hovered() || resp.dragged() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                             }
-                            if resp.dragged() { mod_drag -= resp.drag_delta().x; }
+                            if resp.dragged() { mod_drag -= ui.input(|i| i.pointer.delta().x); }
                             if resp.drag_stopped() { drag_stopped = true; }
                         });
                     })
@@ -188,6 +188,16 @@ impl KeyFmApp {
                                         }
                                     });
                                     response.context_menu(|ui| {
+                                        if in_bin {
+                                            if ui.button("View full path").clicked() {
+                                                if let Some(orig) = &item_orig {
+                                                    *pending_action =
+                                                        UiAction::ShowPathInStatus(orig.clone());
+                                                }
+                                                ui.close_menu();
+                                            }
+                                            ui.separator();
+                                        }
                                         if ui.button("Open").clicked() {
                                             *pending_action = UiAction::Open(item_path.clone()); ui.close_menu();
                                         }
@@ -230,10 +240,12 @@ impl KeyFmApp {
                                                 .map(|p| p.to_string_lossy().to_string())
                                                 .unwrap_or_default()
                                         };
-                                        let loc = if loc.chars().count() > 60 {
-                                            format!("{}...", loc.chars().take(57).collect::<String>())
-                                        } else { loc };
-                                        ui.label(egui::RichText::new(loc).color(self.theme.dim));
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(loc).color(self.theme.dim),
+                                            )
+                                            .truncate(),
+                                        );
                                     });
                                 }
 
@@ -276,13 +288,16 @@ impl KeyFmApp {
                             });
                         }
                     });
+                let table_avail = ui.available_width();
                 if size_drag != 0.0 {
+                    let max_size = (table_avail - self.config.mod_col_width - 120.0).max(60.0);
                     self.config.size_col_width =
-                        (self.config.size_col_width + size_drag).clamp(60.0, 600.0);
+                        (self.config.size_col_width + size_drag).clamp(60.0, 600.0).min(max_size);
                 }
                 if mod_drag != 0.0 {
+                    let max_mod = (table_avail - self.config.size_col_width - 120.0).max(60.0);
                     self.config.mod_col_width =
-                        (self.config.mod_col_width + mod_drag).clamp(60.0, 400.0);
+                        (self.config.mod_col_width + mod_drag).clamp(60.0, 400.0).min(max_mod);
                 }
                 if drag_stopped { self.save_cfg(); }
 

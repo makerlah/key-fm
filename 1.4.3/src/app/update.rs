@@ -194,6 +194,9 @@ impl KeyFmApp {
                 if self.search_active() { self.last_search_query.clear(); }
                 else { self.refresh_keep_selection(); }
             }
+            UiAction::ShowPathInStatus(p) => {
+                self.status_msg = format!("Full path: {}", p.display());
+            }
         }
 
         if self.is_virtual_view() && self.active_dialog.is_some() {
