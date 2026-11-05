@@ -19,19 +19,8 @@ const PANEL_PAD_X: f32 = 8.0;
 /// Space above the top row (inside the panel).
 const PANEL_PAD_TOP: f32 = 4.0;
 
-fn sel_fill(theme: &Theme, ui: &egui::Ui) -> egui::Color32 {
-    let hovered = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| {
-        p.y >= ui.max_rect().top() && p.y <= ui.max_rect().bottom() && ui.clip_rect().contains(p)
-    });
-    if hovered {
-        if theme.bg.r() > 128 {
-            egui::Color32::from_rgb(0xD4, 0xD0, 0xCF)
-        } else {
-            egui::Color32::from_rgb(0x5E, 0x5A, 0x5A)
-        }
-    } else {
-        theme.sel_bg
-    }
+fn sel_fill(theme: &Theme, _ui: &egui::Ui) -> egui::Color32 {
+    theme.sel_bg
 }
 
 fn stroke_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
