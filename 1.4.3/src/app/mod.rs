@@ -78,7 +78,8 @@ impl KeyFmApp {
         if start.is_none() && !config.open_tabs.is_empty() {
             for t in &config.open_tabs {
                 let p = PathBuf::from(t);
-                if p.is_dir() {
+                // FIXED: Allow virtual paths like ::this-pc:: to be restored
+                if crate::constants::VIRTUAL.contains(&t.as_str()) || p.is_dir() {
                     tabs.push(Tab::new(Some(p)));
                 }
             }
