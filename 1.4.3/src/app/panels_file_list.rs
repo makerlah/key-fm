@@ -47,25 +47,27 @@ impl KeyFmApp {
                 let searching = self.search_active();
                 
                 // --- FIX: Temporarily take ownership of the lists so `self` isn't immutably borrowed ---
-                let mut local_entries = if searching { Vec::new() } else { std::mem::take(&mut self.entries) };
-                let mut local_search_results = if searching { std::mem::take(&mut self.search_results) } else { Vec::new() };
+                let local_entries = if searching { Vec::new() } else { std::mem::take(&mut self.entries) };
+                let local_search_results = if searching { std::mem::take(&mut self.search_results) } else { Vec::new() };
                 let shown: &[crate::models::Item] = if searching { &local_search_results } else { &local_entries };
 
                 let show_where = searching || in_bin;
                 let size_w = self.config.size_col_width.clamp(60.0, 600.0);
                 let mod_w  = self.config.mod_col_width.clamp(60.0, 400.0);
                 let loc_w  = 240.0_f32;
-                let mut size_drag = 0.0_f32;
-                let mut mod_drag  = 0.0_f32;
-                let mut drag_stopped = false;
                 let row_right = ui.max_rect().right();
-                let mut table = egui_extras::TableBuilder::new(ui).vscroll(false)
-                    .column(egui_extras::Column::remainder().clip(true));
+                let mut table = egui_extras::TableBuilder::new(ui)
+                    .vscroll(false)
+                    .resizable(true)
+                    .column(egui_extras::Column::remainder().clip(true).at_least(120.0));
                 if show_where {
-                    table = table.column(egui_extras::Column::exact(loc_w));
+                    table = table.column(
+                        egui_extras::Column::initial(loc_w).at_least(80.0).clip(true),
+                    );
                 }
-                table.column(egui_extras::Column::exact(size_w))
-                    .column(egui_extras::Column::exact(mod_w))
+                table = table
+                    .column(egui_extras::Column::initial(size_w).at_least(60.0).at_most(600.0))
+                    .column(egui_extras::Column::initial(mod_w).at_least(60.0).at_most(400.0))
                     .header(20.0, |mut header| {
                         header.col(|ui| { ui.strong("Name"); });
                         if show_where {
@@ -80,22 +82,6 @@ impl KeyFmApp {
                         }
                         header.col(|ui| {
                             ui.strong(size_title);
-                            let r = ui.max_rect();
-                            let handle = egui::Rect::from_min_max(
-                                egui::pos2(r.left(),       r.top()),
-                                egui::pos2(r.left() + 8.0, r.bottom()),
-                            );
-                            let resp = ui.interact(
-                                handle,
-                                egui::Id::new("keyfm_resize_size_col"),
-                                egui::Sense::drag(),
-                            );
-                            if resp.hovered() || resp.dragged() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                            }
-                            if resp.dragged() { size_drag -= ui.input(|i| i.pointer.delta().x); }
-                            if resp.drag_stopped() { drag_stopped = true; }
-                        });
                         header.col(|ui| {
                             ui.strong(mod_title);
                             let r = ui.max_rect();
@@ -288,21 +274,8 @@ impl KeyFmApp {
                             });
                         }
                     });
-                let table_avail = ui.available_width();
-                if size_drag != 0.0 {
-                    let max_size = (table_avail - self.config.mod_col_width - 120.0).max(60.0);
-                    self.config.size_col_width =
-                        (self.config.size_col_width + size_drag).clamp(60.0, 600.0).min(max_size);
-                }
-                if mod_drag != 0.0 {
-                    let max_mod = (table_avail - self.config.size_col_width - 120.0).max(60.0);
-                    self.config.mod_col_width =
-                        (self.config.mod_col_width + mod_drag).clamp(60.0, 400.0).min(max_mod);
-                }
-                if drag_stopped { self.save_cfg(); }
-
-                let remaining_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
-                if remaining_height > 0.0 {
+                    let remaining_height = (ui.clip_rect().bottom() - ui.cursor().top()).max(0.0);
+                    if remaining_height > 0.0 {
                     let remaining_rect = egui::Rect::from_min_size(
                         ui.cursor().min, egui::vec2(ui.available_width(), remaining_height));
                     let response = ui.allocate_rect(remaining_rect, egui::Sense::click_and_drag());
