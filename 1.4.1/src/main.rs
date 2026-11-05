@@ -2950,7 +2950,7 @@ row.col(|ui| {
                 stroke_rect(
                     ui.painter(),
                     lr,
-                    egui::Stroke::new(1.0_f32, self.theme.hover),
+                    egui::Stroke::new(1.0_f32, self.theme.dim),
                 );
             }
             if ui.input(|i| i.pointer.primary_released()) {
