@@ -1,0 +1,52 @@
+Drag and drop: drag files onto a folder or another tab to move them (Ctrl to copy). Right now you can only cut and paste.
+Undo/redo: Ctrl+Z for rename, move and delete. Deletes go to the Recycle Bin, so they’d be easy to undo.
+Progress bar for big copies: copying large folders currently freezes the window until it finishes.
+Direct Context Menu
+Search subfolders: the filter only searches the folder you’re in. A recursive search (Ctrl+Shift+F) would find files anywhere below it.
+Breadcrumb path bar: clickable C: › Users › you segments, like Explorer, alongside the typed path
+Restore tabs on launch: reopen the tabs and folders you had last time.        
+Open with notepad, vscode, vscodium, irfanview, sumatra pdf if installed, directly in the context menu
+Preview pane: show images and text files on the side without opening them. u should be able to disable this one but on by default
+Multi-rename: rename many files at once with a pattern like photo_{n}.
+Zip and unzip: right-click to compress or extract.
+Search result highlighting: Highlight the matching text in the file name (e.g., if you search doc, make the doc part of document.txt bold).
+Fuzzy search: Make it so typing dcs finds documents.
+
+
+Network Drives
+Column sizing and more columns: type, resizable widths, and “show extensions” toggles.
+Bookmarks for files: pin files, not just folders.
+Open Amd adrenalin software if installed, open nvidia app, open nvidia comtrol panel in context menu if installed
+Exif and MetaData Stripper for all files and folders
+Filee Integration
+Format Drive
+Cargo keep the dependemcy packages local i forgot what it was called
+
+
+ISSUES:
+Fixed:
+lasso improvement, ✔
+search file i wanna make it search still just filtering with differnet name, ✔
+keyboard shortcuts, ✔
+Keyboard Shortcuts Menu f1 + in view tab✔
+Slow Loading Time✔
+Fix Open With menu✔
+the blue outline while hovering over file or folder odesnt add up with where thye folder is, but not by a lot✔
+the blue outline while hovering over file or folder odesnt add up with where thye folder is, but not by a lot✔
+lasso colour change✔
+the up down controls dont work in sidebar✔
+
+
+Active:
+quick access should have a page when u click on it like this pc
+Can only pin folders to quick access not files
+Search bar and path bar merge into a mess when not fullscreen do it like how windows explorer does
+All the column resizing is broken
+recycle bin extra column needed for deleted from
+
+Context menu and open with from 1.3.2
+ACTION_DEFS includes some actions with no handler yet (cd, search, quick_jump, invert_selection, visual_line, properties, terminal, sort_reverse, sidebar_focus, command_palette). Their defaults will now be bound to the no-op _ => {} arm, so pressing e.g. / does nothing rather than opening a search prompt. That's the same as before (they never worked), but if you'd rather not burn those keys, trim them from ACTION_DEFS.
+The o vs O distinction relies on norm_spec no longer uppercasing single letters. If someone has an existing config written when it did uppercase, their "o" bindings will now be preserved as "o" (good) and their "O" bindings stay "O" (also good) — but their "o" stored as "O" from before will be treated as Shift+O. They'd need to hand-edit the config. Small migration wart.
+copy_dir_all's self-check compares dst_canon against src_canon. It handles dst-not-yet-existing by resolving the parent. But if the parent doesn't exist either, we skip the check and let create_dir_all error out normally. Edge case, not a correctness issue.
+is_executable_candidate on Windows now only accepts .exe/.scr/.com. If your users expect to pick .bat files, you'll need to special-case them in launch_with to route through cmd /c start "". I intentionally left that out — it's a whole separate behavior and the current Command::new path fails silently, which is worse than not offering the option.
+UI Revamp

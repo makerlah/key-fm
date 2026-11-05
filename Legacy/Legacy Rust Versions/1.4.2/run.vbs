@@ -1,0 +1,1 @@
+CreateObject("WScript.Shell").Run "cmd /c """ & CreateObject("Scripting.FileSystemObject").GetAbsolutePathName(".\") & "\run.bat""", 0, False
