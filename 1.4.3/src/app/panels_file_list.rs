@@ -66,16 +66,20 @@ impl KeyFmApp {
                     .vscroll(false)
                     .resizable(true)
                     .column(egui_extras::Column::remainder().clip(true).at_least(120.0));
-                    
+
                 if show_where {
                     table = table.column(
                         egui_extras::Column::initial(loc_w).at_least(80.0).clip(true),
                     );
                 }
-                
+
+                table = table.column(egui_extras::Column::initial(size_w).at_least(60.0).at_most(600.0));
+
+                if !is_pc {
+                    table = table.column(egui_extras::Column::initial(mod_w).at_least(60.0).at_most(400.0));
+                }
+
                 table
-                    .column(egui_extras::Column::initial(size_w).at_least(60.0).at_most(600.0))
-                    .column(egui_extras::Column::initial(mod_w).at_least(60.0).at_most(400.0))
                     .header(20.0, |mut header| {
                         header.col(|ui| { ui.strong("Name"); });
                         if show_where {
@@ -89,7 +93,9 @@ impl KeyFmApp {
                             });
                         }
                         header.col(|ui| { ui.strong(size_title); });
-                        header.col(|ui| { ui.strong(mod_title); });
+                        if !is_pc {
+                            header.col(|ui| { ui.strong(mod_title); });
+                        }
                     })
                     .body(|mut body| {
                         for (idx, item) in shown.iter().enumerate() {
@@ -273,18 +279,20 @@ impl KeyFmApp {
                                         ui.horizontal(|ui| { ui.label(size_str); });
                                     }
                                 });
-                                row.col(|ui| {
-                                    let r = ui.max_rect();
-                                    if self.selected_item == Some(idx) || self.selected_items.contains(&idx) {
-                                        ui.painter().rect_filled(r, 0.0, sel_fill(&self.theme, ui));
-                                    }
-                                    ui.painter().text(
-                                        egui::pos2(r.left() + 4.0, r.center().y),
-                                        egui::Align2::LEFT_CENTER,
-                                        &time_str,
-                                        egui::TextStyle::Body.resolve(ui.style()),
-                                        self.theme.dim);
-                                });
+                                if !is_pc {
+                                    row.col(|ui| {
+                                        let r = ui.max_rect();
+                                        if self.selected_item == Some(idx) || self.selected_items.contains(&idx) {
+                                            ui.painter().rect_filled(r, 0.0, sel_fill(&self.theme, ui));
+                                        }
+                                        ui.painter().text(
+                                            egui::pos2(r.left() + 4.0, r.center().y),
+                                            egui::Align2::LEFT_CENTER,
+                                            &time_str,
+                                            egui::TextStyle::Body.resolve(ui.style()),
+                                            self.theme.dim);
+                                    });
+                                }
                             });
                         }
                     });

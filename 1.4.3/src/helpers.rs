@@ -6,14 +6,14 @@ use crate::constants::{THIS_PC, RECYCLE, QUICK_ACCESS};
 
 pub fn human_size(n: u64) -> String {
     if n < 1024 { return format!("{} B", n); }
-    let units = ["KB", "MB", "GB", "TB"];
+    let units = ["KB", "MB", "GB", "TB", "PB", "EB"];
     let mut val = n as f64;
     let mut idx = 0;
     while val >= 1024.0 && idx < units.len() - 1 {
         val /= 1024.0;
         idx += 1;
     }
-    format!("{:.1} {}", val, units[idx])
+    format!("{:.1} {}", val, units[idx - 1])
 }
 
 pub fn fmt_time(ts: Option<f64>) -> String {
