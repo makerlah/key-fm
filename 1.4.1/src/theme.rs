@@ -28,7 +28,7 @@ pub const LIGHT: Theme = Theme {
     fg: Color32::from_rgb(0x1A, 0x1A, 0x1A),       // Primary text (off-black)
     field: Color32::from_rgb(0xFF, 0xFF, 0xFF),    // Text inputs & search boxes
     side: Color32::from_rgb(0xEA, 0xEA, 0xEA),     // Sidebar (slightly darker)
-    sel_bg: Color32::from_rgb(0xCC, 0xE4, 0xF7),   // Selection (Win11 light blue)
+    sel_bg: Color32::from_rgb(0xDD, 0xDD, 0xDD),   // Selection (Win11 light blue)
     sel_fg: Color32::from_rgb(0x00, 0x00, 0x00),   // Text on selection
     head: Color32::from_rgb(0xF3, 0xF3, 0xF3),     // Table headers
     border: Color32::from_rgb(0xE0, 0xE0, 0xE0),   // Subtle dividing lines
@@ -50,7 +50,7 @@ pub const DARK: Theme = Theme {
     fg: Color32::from_rgb(0xF0, 0xF0, 0xF0),       // Primary text (soft white)
     field: Color32::from_rgb(0x2D, 0x2D, 0x2D),    // Text inputs & search boxes
     side: Color32::from_rgb(0x1C, 0x1C, 0x1C),     // Sidebar (slightly darker)
-    sel_bg: Color32::from_rgb(0x2D, 0x5E, 0x8A),   // Selection (Win11 dark blue)
+    sel_bg: Color32::from_rgb(0x3C, 0x3C, 0x3C),   // Selection (Win11 dark blue)
     sel_fg: Color32::from_rgb(0xFF, 0xFF, 0xFF),   // Text on selection
     head: Color32::from_rgb(0x20, 0x20, 0x20),     // Table headers
     border: Color32::from_rgb(0x33, 0x33, 0x33),   // Subtle dividing lines
