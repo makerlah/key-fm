@@ -155,6 +155,7 @@ impl KeyFmApp {
     pub(crate) fn load_tab(&mut self, index: usize) {
         self.save_current_tab();
         self.load_tab_no_save(index);
+        self.save_cfg(); // persist active_tab
     }
 
     pub(crate) fn load_tab_no_save(&mut self, index: usize) {
@@ -184,6 +185,7 @@ impl KeyFmApp {
         self.tabs.push(new_t);
         let idx = self.tabs.len() - 1;
         self.load_tab(idx);
+        self.save_cfg(); // persist immediately
     }
 
     pub(crate) fn close_tab(&mut self) {
@@ -201,6 +203,7 @@ impl KeyFmApp {
             let target = self.cur_tab;
             self.load_tab_no_save(target);
         }
+        self.save_cfg(); // persist immediately
     }
 
     pub(crate) fn set_cwd(&mut self, new_cwd: String) {
