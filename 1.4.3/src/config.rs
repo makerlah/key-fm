@@ -26,6 +26,11 @@ pub struct Config {
     pub size_col_width: f32,
     #[serde(default = "default_mod_col")]
     pub mod_col_width: f32,
+    // ADDED: Tab restoration fields
+    #[serde(default)]
+    pub open_tabs: Vec<String>,
+    #[serde(default)]
+    pub active_tab: usize,
 }
 
 pub fn default_sidebar_width() -> f32 {
@@ -51,16 +56,11 @@ pub fn old_pins_path() -> Option<PathBuf> {
     directories::UserDirs::new().map(|ud| ud.home_dir().join(OLD_PIN_FILE_NAME))
 }
 
-/// Loads the config. The returned flag is true when the pins were migrated
-/// from the legacy pin file; the legacy file is NOT deleted here, so nothing
-/// is lost unless the caller has first saved the new config successfully.
 pub fn load_config_with_migration(path: &Path, old_pins: &Path) -> (Config, bool) {
     let (cfg, migrated, _corrupt) = load_config_full(path, old_pins);
     (cfg, migrated)
 }
 
-/// Like [`load_config_with_migration`], plus a flag that is true when the main
-/// config file exists but could not be parsed (defaults were used instead).
 pub fn load_config_full(path: &Path, old_pins: &Path) -> (Config, bool, bool) {
     let mut cfg = Config::default();
     let mut migrated = false;
@@ -77,22 +77,16 @@ pub fn load_config_full(path: &Path, old_pins: &Path) -> (Config, bool, bool) {
             if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&content) {
                 loaded_main = true;
                 if let Some(v) = map.get("dark") {
-                    if let Some(b) = v.as_bool() {
-                        cfg.dark = b;
-                    }
+                    if let Some(b) = v.as_bool() { cfg.dark = b; }
                 }
                 if let Some(v) = map.get("show_hidden") {
-                    if let Some(b) = v.as_bool() {
-                        cfg.show_hidden = b;
-                    }
+                    if let Some(b) = v.as_bool() { cfg.show_hidden = b; }
                 }
                 if let Some(v) = map.get("pins") {
                     if let Some(arr) = v.as_array() {
                         let mut pins = Vec::new();
                         for item in arr {
-                            if let Some(s) = item.as_str() {
-                                pins.push(s.to_string());
-                            }
+                            if let Some(s) = item.as_str() { pins.push(s.to_string()); }
                         }
                         cfg.pins = pins;
                     }
@@ -101,9 +95,7 @@ pub fn load_config_full(path: &Path, old_pins: &Path) -> (Config, bool, bool) {
                     if let Some(arr) = v.as_array() {
                         let mut unpinned = Vec::new();
                         for item in arr {
-                            if let Some(s) = item.as_str() {
-                                unpinned.push(s.to_string());
-                            }
+                            if let Some(s) = item.as_str() { unpinned.push(s.to_string()); }
                         }
                         cfg.unpinned = unpinned;
                     }
@@ -122,15 +114,9 @@ pub fn load_config_full(path: &Path, old_pins: &Path) -> (Config, bool, bool) {
                                                     let mut valid = true;
                                                     for arg_item in arr {
                                                         if let Some(s) = arg_item.as_str() {
-                                                            if s.is_empty() {
-                                                                valid = false;
-                                                                break;
-                                                            }
+                                                            if s.is_empty() { valid = false; break; }
                                                             argv.push(s.to_string());
-                                                        } else {
-                                                            valid = false;
-                                                            break;
-                                                        }
+                                                        } else { valid = false; break; }
                                                     }
                                                     if valid && !argv.is_empty() {
                                                         let cwd = sub_obj.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string());
@@ -161,14 +147,25 @@ pub fn load_config_full(path: &Path, old_pins: &Path) -> (Config, bool, bool) {
                                             }
                                         }
                                     }
-                                    if !specs.is_empty() {
-                                        keys.insert(action_id.clone(), specs);
-                                    }
+                                    if !specs.is_empty() { keys.insert(action_id.clone(), specs); }
                                 }
                             }
                         }
                         cfg.keys = keys;
                     }
+                }
+                // ADDED: Load tabs
+                if let Some(v) = map.get("open_tabs") {
+                    if let Some(arr) = v.as_array() {
+                        let mut tabs = Vec::new();
+                        for item in arr {
+                            if let Some(s) = item.as_str() { tabs.push(s.to_string()); }
+                        }
+                        cfg.open_tabs = tabs;
+                    }
+                }
+                if let Some(v) = map.get("active_tab") {
+                    if let Some(n) = v.as_u64() { cfg.active_tab = n as usize; }
                 }
             }
         }
@@ -200,12 +197,8 @@ pub fn save_config_to(cfg: &Config, path: &Path) -> bool {
     if let Ok(json) = serde_json::to_string_pretty(cfg) {
         let temp_path = path.with_extension("tmp");
         if fs::write(&temp_path, json).is_ok() {
-            // rename can fail across filesystems (NFS, symlinked $HOME): fall back to copy.
             let placed = fs::rename(&temp_path, path).is_ok()
-                || (fs::copy(&temp_path, path).is_ok() && {
-                    let _ = fs::remove_file(&temp_path);
-                    true
-                });
+                || (fs::copy(&temp_path, path).is_ok() && { let _ = fs::remove_file(&temp_path); true });
             if placed {
                 #[cfg(unix)]
                 {
@@ -224,25 +217,20 @@ pub fn load_config() -> Config {
     load_config_status().0
 }
 
-/// Loads the config; the second value is a message for the user when something
-/// needed attention (an unreadable config was backed up and defaults are in use).
 pub fn load_config_status() -> (Config, Option<String>) {
     let p = config_path().unwrap_or_else(|| PathBuf::from(CONFIG_FILE_NAME));
     let op = old_pins_path().unwrap_or_else(|| PathBuf::from(OLD_PIN_FILE_NAME));
     let (cfg, migrated, corrupt) = load_config_full(&p, &op);
     let mut notice = None;
     if (migrated || corrupt) && p.exists() {
-        // Keep a copy of an unreadable main config rather than silently overwriting it.
         let bak = p.with_extension("bak");
         if fs::copy(&p, &bak).is_ok() && corrupt {
             notice = Some(format!(
-                "Config could not be read; using defaults. A copy was saved to {}",
-                bak.display()
+                "Config could not be read; using defaults. A copy was saved to {}", bak.display()
             ));
         }
     }
     if migrated {
-        // Only remove the legacy pin file once the new config is safely on disk.
         if save_config_to(&cfg, &p) {
             let _ = fs::remove_file(&op);
         }
