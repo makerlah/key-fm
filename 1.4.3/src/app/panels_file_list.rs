@@ -59,12 +59,20 @@ impl KeyFmApp {
                 let show_where = searching || in_bin;
                 let size_w = self.config.size_col_width.clamp(60.0, 600.0);
                 let mod_w  = self.config.mod_col_width.clamp(60.0, 400.0);
-                let loc_w  = 240.0_f32;
+                let loc_w  = self.config.where_col_width.clamp(80.0, 600.0);
                 let row_right = ui.max_rect().right();
                 
+                let view_id = if is_pc { "this_pc" }
+                    else if in_bin { "bin" }
+                    else if searching { "search" }
+                    else { "folder" };
+                let id_salt = format!("file_list_table_{}", view_id);
+                let table_id = ui.make_persistent_id(&id_salt);
+
                 let mut table = egui_extras::TableBuilder::new(ui)
                     .vscroll(false)
                     .resizable(true)
+                    .id_salt(&id_salt)
                     .column(egui_extras::Column::remainder().clip(true).at_least(120.0));
 
                 if show_where {
@@ -330,6 +338,47 @@ impl KeyFmApp {
                     self.entries = local_entries;
                 }
             });
+
+            if let Some(state) = egui_extras::TableState::load(ctx, table_id) {
+                if ctx.input(|i| i.pointer.any_released()) {
+                    let mut changed = false;
+                    let mut idx = 0;
+
+                    idx += 1;
+
+                    if show_where {
+                        if idx < state.col_widths.len() {
+                            let w = state.col_widths[idx];
+                            if (w - self.config.where_col_width).abs() > 0.5 {
+                                self.config.where_col_width = w;
+                                changed = true;
+                            }
+                        }
+                        idx += 1;
+                    }
+
+                    if idx < state.col_widths.len() {
+                        let w = state.col_widths[idx];
+                        if (w - self.config.size_col_width).abs() > 0.5 {
+                            self.config.size_col_width = w;
+                            changed = true;
+                        }
+                    }
+                    idx += 1;
+
+                    if !is_pc {
+                        if idx < state.col_widths.len() {
+                            let w = state.col_widths[idx];
+                            if (w - self.config.mod_col_width).abs() > 0.5 {
+                                self.config.mod_col_width = w;
+                                changed = true;
+                            }
+                        }
+                    }
+
+                    if changed { self.save_cfg(); }
+                }
+            }
 
             if let Some(lr) = lasso_rect {
                 stroke_rect(ui.painter(), lr, egui::Stroke::new(1.0_f32, self.theme.dim));

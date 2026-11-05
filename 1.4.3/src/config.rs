@@ -26,6 +26,8 @@ pub struct Config {
     pub size_col_width: f32,
     #[serde(default = "default_mod_col")]
     pub mod_col_width: f32,
+    #[serde(default = "default_where_col")]
+    pub where_col_width: f32,
     // ADDED: Tab restoration fields
     #[serde(default)]
     pub open_tabs: Vec<String>,
@@ -43,6 +45,10 @@ pub fn default_size_col() -> f32 {
 
 pub fn default_mod_col() -> f32 {
     150.0
+}
+
+pub fn default_where_col() -> f32 {
+    240.0
 }
 
 pub fn config_path() -> Option<PathBuf> {
