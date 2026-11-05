@@ -7,7 +7,6 @@ use crate::drives;
 use crate::constants::{THIS_PC, QUICK_ACCESS};
 use std::path::PathBuf;
 
-// These are the lines that were missing!
 mod types;
 mod ui_utils;
 mod search;
@@ -26,6 +25,7 @@ mod dialogs_open_with;
 pub(crate) use types::ClipItem;
 pub(crate) use search::SearchHit;
 pub(crate) use open_with::OpenWithState;
+
 pub struct KeyFmApp {
     config: Config,
     theme: Theme,
@@ -64,20 +64,42 @@ pub struct KeyFmApp {
 impl KeyFmApp {
     pub fn new(start: Option<String>) -> Self {
         let (mut config, config_notice) = crate::config::load_config_status();
-        if config.sidebar_width < 120.0 {
-            config.sidebar_width = crate::config::default_sidebar_width();
-        }
-        if config.size_col_width < 60.0 {
-            config.size_col_width = crate::config::default_size_col();
-        }
-        if config.mod_col_width < 60.0 {
-            config.mod_col_width = crate::config::default_mod_col();
-        }
+        if config.sidebar_width < 120.0 { config.sidebar_width = crate::config::default_sidebar_width(); }
+        if config.size_col_width < 60.0 { config.size_col_width = crate::config::default_size_col(); }
+        if config.mod_col_width < 60.0 { config.mod_col_width = crate::config::default_mod_col(); }
+        
         let theme = if config.dark { DARK } else { LIGHT };
-        let start_dir = crate::helpers::get_start_dir(start);
-        let cwd = start_dir.to_string_lossy().to_string();
+        
+        let start_dir = crate::helpers::get_start_dir(start.clone());
+        let mut tabs = Vec::new();
+        let mut cur_tab = 0;
+
+        // Restore tabs if no specific directory was passed in the terminal
+        if start.is_none() && !config.open_tabs.is_empty() {
+            for t in &config.open_tabs {
+                let p = PathBuf::from(t);
+                if p.is_dir() {
+                    tabs.push(Tab::new(Some(p)));
+                }
+            }
+            if !tabs.is_empty() {
+                cur_tab = config.active_tab.min(tabs.len() - 1);
+            }
+        }
+        
+        // Fallback to default start dir if no tabs were restored
+        if tabs.is_empty() {
+            tabs.push(Tab::new(Some(start_dir)));
+        }
+
+        let cwd = tabs.get(cur_tab)
+            .and_then(|t| t.cwd.as_ref())
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .to_string_lossy()
+            .to_string();
         let path_input = cwd.clone();
-        let tab = Tab::new(Some(start_dir));
+
         let mut app = Self {
             config,
             show_shortcuts: false,
@@ -87,8 +109,8 @@ impl KeyFmApp {
             selected_item: None,
             search_query: String::new(),
             path_input,
-            tabs: vec![tab],
-            cur_tab: 0,
+            tabs,
+            cur_tab,
             clipboard: Vec::new(),
             clip_mode: "copy".to_string(),
             active_dialog: None,
@@ -123,8 +145,7 @@ impl KeyFmApp {
         if let Some(tab) = self.tabs.get_mut(self.cur_tab) {
             tab.cwd = Some(std::path::PathBuf::from(&self.cwd));
             tab.search_query = self.search_query.clone();
-            tab.focus = self
-                .selected_item
+            tab.focus = self.selected_item
                 .and_then(|idx| self.entries.get(idx))
                 .map(|item| item.path.clone());
         }
@@ -169,17 +190,13 @@ impl KeyFmApp {
     }
 
     pub(crate) fn close_tab_at(&mut self, idx: usize) {
-        if self.tabs.len() <= 1 || idx >= self.tabs.len() {
-            return;
-        }
+        if self.tabs.len() <= 1 || idx >= self.tabs.len() { return; }
         self.save_current_tab();
         self.tabs.remove(idx);
         if idx < self.cur_tab {
             self.cur_tab -= 1;
         } else if idx == self.cur_tab {
-            if self.cur_tab >= self.tabs.len() {
-                self.cur_tab = self.tabs.len() - 1;
-            }
+            if self.cur_tab >= self.tabs.len() { self.cur_tab = self.tabs.len() - 1; }
             let target = self.cur_tab;
             self.load_tab_no_save(target);
         }
@@ -208,10 +225,7 @@ impl KeyFmApp {
     }
 
     pub(crate) fn modal_open(&self) -> bool {
-        self.active_dialog.is_some()
-            || self.confirm_empty_bin
-            || self.show_shortcuts
-            || self.open_with.is_some()
+        self.active_dialog.is_some() || self.confirm_empty_bin || self.show_shortcuts || self.open_with.is_some()
     }
 
     pub(crate) fn rendered_entries(&self) -> &[crate::models::Item] {
@@ -219,14 +233,12 @@ impl KeyFmApp {
     }
 
     pub(crate) fn search_active(&self) -> bool {
-        self.search_query.chars().count() > 1
-            && (self.search_running || !self.search_results.is_empty())
+        self.search_query.chars().count() > 1 && (self.search_running || !self.search_results.is_empty())
     }
 
     pub(crate) fn is_visible(&self, idx: usize) -> bool {
         let f = self.search_query.to_lowercase();
-        f.is_empty()
-            || self.rendered_entries().get(idx).map_or(false, |e| e.name.to_lowercase().contains(&f))
+        f.is_empty() || self.rendered_entries().get(idx).map_or(false, |e| e.name.to_lowercase().contains(&f))
     }
 
     pub(crate) fn visible_indices(&self) -> Vec<usize> {
@@ -246,9 +258,7 @@ impl KeyFmApp {
     }
 
     pub(crate) fn cancel_search(&mut self) {
-        if let Some(c) = self.search_cancel.take() {
-            c.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
+        if let Some(c) = self.search_cancel.take() { c.store(true, std::sync::atomic::Ordering::Relaxed); }
         self.search_rx = None;
         if let Some(ts) = self.search_threads.take() {
             for t in ts { let _ = t.join(); }
@@ -260,6 +270,13 @@ impl KeyFmApp {
     }
 
     pub(crate) fn save_cfg(&mut self) {
+        self.save_current_tab(); // Ensure current path is synced to the tab
+        self.config.open_tabs = self.tabs.iter()
+            .filter_map(|t| t.cwd.as_ref())
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        self.config.active_tab = self.cur_tab;
+        
         if !crate::config::save_config(&self.config) {
             self.status_msg = "Failed to save config".to_string();
         }
@@ -286,5 +303,12 @@ impl KeyFmApp {
     pub(crate) fn refresh_keep_selection(&mut self) {
         self.refresh_caches();
         self.reload(true);
+    }
+}
+
+// ADDED: Guarantees tabs are saved no matter how the window is closed
+impl Drop for KeyFmApp {
+    fn drop(&mut self) {
+        self.save_cfg();
     }
 }
