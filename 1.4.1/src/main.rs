@@ -19,6 +19,21 @@ const PANEL_PAD_X: f32 = 8.0;
 /// Space above the top row (inside the panel).
 const PANEL_PAD_TOP: f32 = 4.0;
 
+fn sel_fill(theme: &Theme, ui: &egui::Ui) -> egui::Color32 {
+    let hovered = ui.input(|i| i.pointer.hover_pos()).map_or(false, |p| {
+        p.y >= ui.max_rect().top() && p.y <= ui.max_rect().bottom() && ui.clip_rect().contains(p)
+    });
+    if hovered {
+        if theme.bg.r() > 128 {
+            egui::Color32::from_rgb(0xD9, 0xD9, 0xD9)
+        } else {
+            egui::Color32::from_rgb(0x4A, 0x4A, 0x4A)
+        }
+    } else {
+        theme.sel_bg
+    }
+}
+
 fn stroke_rect(painter: &egui::Painter, rect: egui::Rect, stroke: egui::Stroke) {
     painter.line_segment([rect.left_top(), rect.right_top()], stroke);
     painter.line_segment([rect.right_top(), rect.right_bottom()], stroke);
@@ -2718,7 +2733,7 @@ impl eframe::App for KeyFmApp {
                                             ui.painter().rect_filled(
                                                 response.rect,
                                                 0.0,
-                                                self.theme.sel_bg,
+                                                sel_fill(&self.theme, ui),
                                             );
                                         } else if response.hovered() {
                                             ui.painter().rect_filled(
@@ -2820,7 +2835,7 @@ impl eframe::App for KeyFmApp {
                                                 ui.painter().rect_filled(
                                                     ui.max_rect(),
                                                     0.0,
-                                                    self.theme.sel_bg,
+                                                    sel_fill(&self.theme, ui),
                                                 );
                                             }
                                             let loc = item_path
@@ -2845,7 +2860,7 @@ row.col(|ui| {
     if self.selected_item == Some(idx)
         || self.selected_items.contains(&idx)
     {
-        ui.painter().rect_filled(ui.max_rect(), 0.0, self.theme.sel_bg);
+        ui.painter().rect_filled(ui.max_rect(), 0.0, sel_fill(&self.theme, ui));
     }
     if is_pc && item_total > 0 {
         let used = item_total.saturating_sub(item_size);
@@ -2886,7 +2901,7 @@ row.col(|ui| {
     if self.selected_item == Some(idx)
         || self.selected_items.contains(&idx)
     {
-        ui.painter().rect_filled(r, 0.0, self.theme.sel_bg);
+        ui.painter().rect_filled(r, 0.0, sel_fill(&self.theme, ui));
     }
     ui.painter().text(
         egui::pos2(r.left() + 4.0, r.center().y),
