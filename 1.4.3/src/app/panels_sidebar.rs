@@ -18,12 +18,14 @@ impl KeyFmApp {
             .resizable(true)
             .default_width(self.config.sidebar_width)
             .min_width(120.0)
-            .max_width(600.0)
+            .max_width(1200.0) // EDITED: Allowed to drag much wider
             .frame(egui::Frame::default().fill(self.theme.bg))
             .show(ctx, |ui| {
                 let panel_rect = ui.max_rect();
                 ui.add_space(PANEL_PAD_TOP);
                 let menu_row_top = ui.cursor().top();
+                
+                // Menus stay fixed at the top, outside the scroll area
                 ui.horizontal(|ui| {
                     ui.set_min_height(TOPBAR_ROW_H);
                     ui.set_max_height(TOPBAR_ROW_H);
@@ -80,6 +82,7 @@ impl KeyFmApp {
                         }
                     });
                 });
+                
                 let menu_row_bottom = menu_row_top + TOPBAR_ROW_H;
                 let sep = egui::Stroke::new(1.0_f32, self.theme.border);
                 ui.painter().line_segment(
@@ -90,126 +93,133 @@ impl KeyFmApp {
                      egui::pos2(panel_rect.right() - 0.5, panel_rect.bottom())], sep);
                 ui.add_space(10.0);
 
-                let sb_locs = self.sidebar_locations();
-                let qa_pos = sb_locs.iter().position(|l| same_loc(l, QUICK_ACCESS)).unwrap_or(0);
-                let is_qa_selected = self.cwd == QUICK_ACCESS
-                    || (self.sidebar_focus && self.sidebar_idx == qa_pos);
-                if ui.selectable_label(is_qa_selected,
-                        egui::RichText::new("Quick access").strong()).clicked()
-                {
-                    *navigate_to = Some(QUICK_ACCESS.to_string());
-                    self.sidebar_focus = true;
-                    self.sidebar_idx = qa_pos;
-                }
-                ui.add_space(4.0);
-
-                if !self.config.pins.is_empty() {
-                    for pin in &self.config.pins {
-                        let label = std::path::Path::new(pin).file_name()
-                            .map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| pin.clone());
-                        let pin_path = std::path::PathBuf::from(pin);
-                        let is_selected = same_loc(&self.cwd, pin)
-                            || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
-                                .position(|l| same_loc(l, pin)).unwrap_or(0));
-                        let resp = ui.selectable_label(is_selected, label);
-                        if resp.clicked() {
-                            if pin_path.is_dir() {
-                                *navigate_to = Some(pin.clone());
-                            } else if pin_path.is_file() {
-                                *pending_action = UiAction::Open(pin_path.clone());
-                            } else {
-                                self.status_msg = format!("Pin no longer available: {}", pin);
-                            }
-                            self.sidebar_focus = true;
-                            self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, pin)).unwrap_or(0);
-                        }
-                        let pin_path_for_menu = pin_path.clone();
-                        resp.context_menu(|ui| {
-                            if ui.button("Open").clicked() {
-                                let target = pin_path_for_menu.clone();
-                                if target.is_dir() {
-                                    *navigate_to = Some(target.to_string_lossy().to_string());
-                                } else if target.is_file() {
-                                    *pending_action = UiAction::Open(target);
-                                }
-                                ui.close_menu();
-                            }
-                            if ui.button("Unpin").clicked() {
-                                *pending_action = UiAction::SidebarUnpin(pin_path_for_menu.clone());
-                                ui.close_menu();
-                            }
-                        });
+                // Put everything below the menus into a ScrollArea
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let sb_locs = self.sidebar_locations();
+                    let qa_pos = sb_locs.iter().position(|l| same_loc(l, QUICK_ACCESS)).unwrap_or(0);
+                    let is_qa_selected = self.cwd == QUICK_ACCESS
+                        || (self.sidebar_focus && self.sidebar_idx == qa_pos);
+                    if ui.selectable_label(is_qa_selected,
+                            egui::RichText::new("Quick access").strong()).clicked()
+                    {
+                        *navigate_to = Some(QUICK_ACCESS.to_string());
+                        self.sidebar_focus = true;
+                        self.sidebar_idx = qa_pos;
                     }
                     ui.add_space(4.0);
-                }
 
-                let known_cache = self.known_cache.clone();
-                for (label, path) in &known_cache {
-                    let path_str = path.to_string_lossy().to_string();
-                    let is_selected = same_loc(&self.cwd, &path_str)
-                        || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
-                            .position(|l| same_loc(l, &path_str)).unwrap_or(0));
-                    let resp = ui.selectable_label(is_selected, *label);
-                    if resp.clicked() {
-                        *navigate_to = Some(path_str.clone());
-                        self.sidebar_focus = true;
-                        self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, &path_str)).unwrap_or(0);
+                    if !self.config.pins.is_empty() {
+                        for pin in &self.config.pins {
+                            let label = std::path::Path::new(pin).file_name()
+                                .map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| pin.clone());
+                            let pin_path = std::path::PathBuf::from(pin);
+                            let is_selected = same_loc(&self.cwd, pin)
+                                || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
+                                    .position(|l| same_loc(l, pin)).unwrap_or(0));
+                            let resp = ui.selectable_label(is_selected, label);
+                            if resp.clicked() {
+                                if pin_path.is_dir() {
+                                    *navigate_to = Some(pin.clone());
+                                } else if pin_path.is_file() {
+                                    *pending_action = UiAction::Open(pin_path.clone());
+                                } else {
+                                    self.status_msg = format!("Pin no longer available: {}", pin);
+                                }
+                                self.sidebar_focus = true;
+                                self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, pin)).unwrap_or(0);
+                            }
+                            let pin_path_for_menu = pin_path.clone();
+                            resp.context_menu(|ui| {
+                                if ui.button("Open").clicked() {
+                                    let target = pin_path_for_menu.clone();
+                                    if target.is_dir() {
+                                        *navigate_to = Some(target.to_string_lossy().to_string());
+                                    } else if target.is_file() {
+                                        *pending_action = UiAction::Open(target);
+                                    }
+                                    ui.close_menu();
+                                }
+                                if ui.button("Unpin").clicked() {
+                                    *pending_action = UiAction::SidebarUnpin(pin_path_for_menu.clone());
+                                    ui.close_menu();
+                                }
+                            });
+                        }
+                        ui.add_space(4.0);
                     }
-                    let path_str_c = path_str.clone();
-                    resp.context_menu(|ui| {
-                        if ui.button("Open").clicked() {
-                            *navigate_to = Some(path_str_c.clone());
-                            ui.close_menu();
-                        }
-                        if !VIRTUAL.contains(&path_str_c.as_str()) {
-                            if ui.button("Pin").clicked() {
-                                *pending_action = UiAction::SidebarPin(std::path::PathBuf::from(&path_str_c));
-                                ui.close_menu();
-                            }
-                            if ui.button("Unpin").clicked() {
-                                *pending_action = UiAction::SidebarUnpin(std::path::PathBuf::from(&path_str_c));
-                                ui.close_menu();
-                            }
-                        }
-                    });
-                }
 
-                ui.add_space(8.0);
-                let is_pc_selected = self.cwd == THIS_PC
-                    || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
-                        .position(|l| same_loc(l, THIS_PC)).unwrap_or(0));
-                if ui.selectable_label(is_pc_selected, egui::RichText::new("This PC").strong()).clicked() {
-                    *navigate_to = Some(THIS_PC.to_string());
-                    self.sidebar_focus = true;
-                    self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, THIS_PC)).unwrap_or(0);
-                }
-
-                let drives_info_cache = self.drives_info_cache.clone();
-                let ppp = ctx.pixels_per_point();
-                for (label, path, free, total) in &drives_info_cache {
-                    let path_str = path.to_string_lossy().to_string();
-                    let is_selected = same_loc(&self.cwd, &path_str)
-                        || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
-                            .position(|l| same_loc(l, &path_str)).unwrap_or(0));
-                    let usage = if *total > 0 { ((*total - *free) as f64 / *total as f64) * 100.0 } else { 0.0 };
-                    ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        let tex = self.icons.get(ctx, IconKind::Drive(path));
-                        draw_icon(ui, ppp, tex.as_ref(), false);
-                        let text = format!("{} {:.1}%", label, usage);
-                        if ui.selectable_label(is_selected, text).clicked() {
+                    let known_cache = self.known_cache.clone();
+                    for (label, path) in &known_cache {
+                        let path_str = path.to_string_lossy().to_string();
+                        let is_selected = same_loc(&self.cwd, &path_str)
+                            || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
+                                .position(|l| same_loc(l, &path_str)).unwrap_or(0));
+                        let resp = ui.selectable_label(is_selected, *label);
+                        if resp.clicked() {
                             *navigate_to = Some(path_str.clone());
                             self.sidebar_focus = true;
                             self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, &path_str)).unwrap_or(0);
                         }
-                    });
-                }
-            });
+                        let path_str_c = path_str.clone();
+                        resp.context_menu(|ui| {
+                            if ui.button("Open").clicked() {
+                                *navigate_to = Some(path_str_c.clone());
+                                ui.close_menu();
+                            }
+                            if !VIRTUAL.contains(&path_str_c.as_str()) {
+                                if ui.button("Pin").clicked() {
+                                    *pending_action = UiAction::SidebarPin(std::path::PathBuf::from(&path_str_c));
+                                    ui.close_menu();
+                                }
+                                if ui.button("Unpin").clicked() {
+                                    *pending_action = UiAction::SidebarUnpin(std::path::PathBuf::from(&path_str_c));
+                                    ui.close_menu();
+                                }
+                            }
+                        });
+                    }
 
+                    ui.add_space(8.0);
+                    let is_pc_selected = self.cwd == THIS_PC
+                        || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
+                            .position(|l| same_loc(l, THIS_PC)).unwrap_or(0));
+                    if ui.selectable_label(is_pc_selected, egui::RichText::new("This PC").strong()).clicked() {
+                        *navigate_to = Some(THIS_PC.to_string());
+                        self.sidebar_focus = true;
+                        self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, THIS_PC)).unwrap_or(0);
+                    }
+
+                    let drives_info_cache = self.drives_info_cache.clone();
+                    let ppp = ctx.pixels_per_point();
+                    for (label, path, free, total) in &drives_info_cache {
+                        let path_str = path.to_string_lossy().to_string();
+                        let is_selected = same_loc(&self.cwd, &path_str)
+                            || (self.sidebar_focus && self.sidebar_idx == sb_locs.iter()
+                                .position(|l| same_loc(l, &path_str)).unwrap_or(0));
+                        let usage = if *total > 0 { ((*total - *free) as f64 / *total as f64) * 100.0 } else { 0.0 };
+                        ui.horizontal(|ui| {
+                            ui.add_space(10.0);
+                            let tex = self.icons.get(ctx, IconKind::Drive(path));
+                            draw_icon(ui, ppp, tex.as_ref(), false);
+                            let text = format!("{} {:.1}%", label, usage);
+                            if ui.selectable_label(is_selected, text).clicked() {
+                                *navigate_to = Some(path_str.clone());
+                                self.sidebar_focus = true;
+                                self.sidebar_idx = sb_locs.iter().position(|l| same_loc(l, &path_str)).unwrap_or(0);
+                            }
+                        });
+                    }
+                }); // <--- Closes ScrollArea
+            }); // <--- Closes SidePanel
+
+        // Resize logic (outside the UI closure)
         let sidebar_width = sidebar_inner.response.rect.width();
         if (sidebar_width - self.config.sidebar_width).abs() > 1.0 {
             self.config.sidebar_width = sidebar_width;
-            self.save_cfg();
+            // Only save to disk when the user releases the mouse button
+            if ctx.input(|i| i.pointer.any_released()) {
+                self.save_cfg();
+            }
         }
     }
 }

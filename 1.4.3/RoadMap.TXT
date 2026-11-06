@@ -23,8 +23,7 @@ Format Drive
 Cargo keep the dependemcy packages local i forgot what it was called
 
 
-ISSUES:
-Fixed:
+Fixed/Added:
 lasso improvement, ✔
 search file i wanna make it search still just filtering with differnet name, ✔
 keyboard shortcuts, ✔
@@ -32,18 +31,23 @@ Keyboard Shortcuts Menu f1 + in view tab✔
 Slow Loading Time✔
 Fix Open With menu✔
 the blue outline while hovering over file or folder odesnt add up with where thye folder is, but not by a lot✔
-the blue outline while hovering over file or folder odesnt add up with where thye folder is, but not by a lot✔
 lasso colour change✔
 the up down controls dont work in sidebar✔
 quick access should have a page when u click on it like this pc✔
 Can only pin folders to quick access not files✔
+recycle bin extra column needed for deleted from✔
+Search bar and path bar merge into a mess when not fullscreen do it like how windows explorer does✔
+also add the ability to scroll in the sidebar✔
+cant delete stuff in the recycle bin✔
+reopens tab on next launch✔
+remove the columns in this pc also tbs/gbs?✔
 
 
 
-Active:
-Search bar and path bar merge into a mess when not fullscreen do it like how windows explorer does
-All the column resizing is broken
-recycle bin extra column needed for deleted from
+ISSUES:
+also save the last column modifications used 
+also hwo does teh search feature work
+sidebar and main file view pane resizing is a bit broken
 
 Context menu and open with from 1.3.2
 ACTION_DEFS includes some actions with no handler yet (cd, search, quick_jump, invert_selection, visual_line, properties, terminal, sort_reverse, sidebar_focus, command_palette). Their defaults will now be bound to the no-op _ => {} arm, so pressing e.g. / does nothing rather than opening a search prompt. That's the same as before (they never worked), but if you'd rather not burn those keys, trim them from ACTION_DEFS.
