@@ -15,7 +15,6 @@ Fuzzy search: Make it so typing dcs finds documents.
 
 Network Drives
 Column sizing and more columns: type, resizable widths, and “show extensions” toggles.
-Bookmarks for files: pin files, not just folders.
 Open Amd adrenalin software if installed, open nvidia app, open nvidia comtrol panel in context menu if installed
 Exif and MetaData Stripper for all files and folders
 Filee Integration
