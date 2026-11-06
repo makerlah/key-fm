@@ -20,7 +20,7 @@ Open Amd adrenalin software if installed, open nvidia app, open nvidia comtrol p
 Exif and MetaData Stripper for all files and folders
 Filee Integration
 Format Drive
-Cargo keep the dependemcy packages local i forgot what it was called
+Cargo vendor
 
 
 Fixed/Added:
